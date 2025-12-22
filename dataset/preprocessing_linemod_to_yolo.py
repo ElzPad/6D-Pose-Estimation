@@ -66,7 +66,9 @@ def setup_directories(output_dir):
     for split in ['train', 'val']:
         os.makedirs(os.path.join(output_dir, 'images', split), exist_ok=True)
         os.makedirs(os.path.join(output_dir, 'labels', split), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'camera_intrinsics', split), exist_ok=True)
 
+    os.makedirs(os.path.join(output_dir, "models"), exist_ok=True)
 
 def process_dataset(dataset_root, output_dir, training_ratio):
     """
@@ -80,9 +82,11 @@ def process_dataset(dataset_root, output_dir, training_ratio):
 
     setup_directories(output_dir)
     root_path = Path(dataset_root)
+    data_path = Path(os.path.join(root_path, 'data'))
+    model_path = os.path.join(root_path, 'models')
 
     # subfolders contains all the subfolders (e.g: "01", "02" etc)
-    subfolders = [f for f in root_path.iterdir() if f.is_dir()]
+    subfolders = [f for f in data_path.iterdir() if f.is_dir()]
 
     total_images = 0
 
@@ -91,6 +95,14 @@ def process_dataset(dataset_root, output_dir, training_ratio):
 
         gt_file = folder / 'gt.yml'
         rgb_dir = folder / 'rgb'
+        info_file = folder / 'info.yml'
+
+        if not info_file.exists():
+            print(f"ALERT: info.yml NOT FOUND in {folder.name}. I'll skip this folder")
+            continue
+
+        with open(info_file, 'r') as f:
+            infos = yaml.load(f, Loader=yaml.SafeLoader)
 
         if not gt_file.exists():
             print(f"ALERT: gt.yml NOT FOUND in {folder.name}. I'll skip this folder")
@@ -138,6 +150,19 @@ def process_dataset(dataset_root, output_dir, training_ratio):
                     label_str = f"{class_id} {yolo_bbox[0]:.6f} {yolo_bbox[1]:.6f} {yolo_bbox[2]:.6f} {yolo_bbox[3]:.6f}"
                     yolo_labels.append(label_str)
                     has_valid_object = True
+            
+            # Camera instrinsics --> 
+            # 0. fx
+            # 1. always 0
+            # 2. cx
+            # 3. always 0
+            # 4. fy
+            # 5. cy
+            # 6. always 0
+            # 7. always 0
+            # 8. always 1
+            camera_str = f"{infos[img_id]['cam_K'][0]} {infos[img_id]['cam_K'][1]} {infos[img_id]['cam_K'][2]} {infos[img_id]['cam_K'][3]} {infos[img_id]['cam_K'][4]} {infos[img_id]['cam_K'][5]} {infos[img_id]['cam_K'][6]} {infos[img_id]['cam_K'][7]} {infos[img_id]['cam_K'][8]}"
+            
 
             # If the image contains at least one object of our interest, we save it
             if has_valid_object:
@@ -147,26 +172,37 @@ def process_dataset(dataset_root, output_dir, training_ratio):
                 # We create a unique name: foldername_imgname.png
                 # Es: 01_0000.png
                 unique_name = f"{folder.name}_{img_filename}"
-                unique_txt = f"{folder.name}_{img_id:04d}.txt"
+                unique_txt = unique_camera = f"{folder.name}_{img_id:04d}.txt"
+                
                 
                 dst_img_path = os.path.join(output_dir, 'images', split, unique_name)
                 dst_label_path = os.path.join(output_dir, 'labels', split, unique_txt)
+                dst_camera_intrinsics_path = os.path.join(output_dir, 'camera_intrinsics', split, unique_camera)
                 
-                # Copy
+                # Image
                 shutil.copy(src_img_path, dst_img_path)
                 
                 # Labeling
                 with open(dst_label_path, 'w') as f_out:
                     f_out.write('\n'.join(yolo_labels))
+
+                # Camera
+                with open(dst_camera_intrinsics_path, 'w') as f_out:
+                    f_out.write(camera_str)
+                
                 
                 total_images += 1
+    
+    dst_models_path = os.path.join(output_dir, 'models')
+    models_info_path = os.path.join(model_path, 'models_info.yml')
+    shutil.copy(models_info_path, dst_models_path)
         
     print(f"\Done! Dataset generated in '{output_dir}'.")
     print(f"All {total_images} images are in 'images/train'.")
 
 
 if __name__ == "__main__":
-    dataset_path = "data/linemod/Linemod_preprocessed/data"
+    dataset_path = "data/linemod/Linemod_preprocessed"
     output_dir = "data/linemod_yolo"
     process_dataset(dataset_path, output_dir, 0.8)
 
