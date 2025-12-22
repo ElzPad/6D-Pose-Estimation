@@ -1,0 +1,9 @@
+PyYAML
+torch
+torchvision
+Pillow
+matplotlib
+numpy
+plotly
+scikit-learn
+# open3d

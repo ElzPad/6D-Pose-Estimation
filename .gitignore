@@ -173,5 +173,8 @@ cython_debug/
 # Datasets
 datasets/
 
+# Docs
+docs/
+
 # PyPI configuration file
 .pypirc
