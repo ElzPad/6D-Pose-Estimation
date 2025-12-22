@@ -98,6 +98,7 @@ class YOLOAugmentation(YOLOBaseTransform):
 
         Returns:
             augmented_image: torch.Tensor
+
             augmented_boxes: List of augmented boxes
         """
         # Convert boxes to list if numpy array
