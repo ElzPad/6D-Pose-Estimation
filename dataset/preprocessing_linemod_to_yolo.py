@@ -4,11 +4,8 @@ import shutil
 import random
 from tqdm import tqdm
 from pathlib import Path
+from PIL import Image
 
-
-# Linemod images' dimension
-IMG_WIDTH = 640
-IMG_HEIGHT = 480
 
 # Mapping ID Linemod -> ID YOLO
 CLASS_MAPPING = {
@@ -65,9 +62,10 @@ def convert_bbox_to_yolo(size, box):
 
 def setup_directories(output_dir):
     """ Creates the structure"""
+    output_dir = Path(output_dir)
     for split in ['train', 'val']:
-            os.makedirs(os.path.join(output_dir, 'images', split), exist_ok=True)
-            os.makedirs(os.path.join(output_dir, 'labels', split), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'images', split), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'labels', split), exist_ok=True)
 
 
 def process_dataset(dataset_root, output_dir, training_ratio):
@@ -118,6 +116,8 @@ def process_dataset(dataset_root, output_dir, training_ratio):
             if not src_img_path.exists():
                 continue #skip
 
+            with Image.open(src_img_path) as img:
+                img_w, img_h = img.size
 
             # We prepare the label for the current image
             yolo_labels = []
@@ -132,34 +132,34 @@ def process_dataset(dataset_root, output_dir, training_ratio):
                     bbox = obj['obj_bb']
                     
                     # Convert
-                    yolo_bbox = convert_bbox_to_yolo((IMG_WIDTH, IMG_HEIGHT), bbox)
+                    yolo_bbox = convert_bbox_to_yolo((img_w, img_h), bbox)
                     
                     # Formatted string --> class_id x_center y_center width height
                     label_str = f"{class_id} {yolo_bbox[0]:.6f} {yolo_bbox[1]:.6f} {yolo_bbox[2]:.6f} {yolo_bbox[3]:.6f}"
                     yolo_labels.append(label_str)
                     has_valid_object = True
 
-                # If the image contains at least one object of our interest, we save it
-                if has_valid_object:
+            # If the image contains at least one object of our interest, we save it
+            if has_valid_object:
 
-                    split = 'train' if random.random() < training_ratio else 'val'
-                    
-                    # We create a unique name: foldername_imgname.png
-                    # Es: 01_0000.png
-                    unique_name = f"{folder.name}_{img_filename}"
-                    unique_txt = f"{folder.name}_{img_id:04d}.txt"
-                    
-                    dst_img_path = os.path.join(output_dir, 'images', split, unique_name)
-                    dst_label_path = os.path.join(output_dir, 'labels', split, unique_txt)
-                    
-                    # Copy
-                    shutil.copy(src_img_path, dst_img_path)
-                    
-                    # Labeling
-                    with open(dst_label_path, 'w') as f_out:
-                        f_out.write('\n'.join(yolo_labels))
-                    
-                    total_images += 1
+                split = 'train' if random.random() < training_ratio else 'val'
+                
+                # We create a unique name: foldername_imgname.png
+                # Es: 01_0000.png
+                unique_name = f"{folder.name}_{img_filename}"
+                unique_txt = f"{folder.name}_{img_id:04d}.txt"
+                
+                dst_img_path = os.path.join(output_dir, 'images', split, unique_name)
+                dst_label_path = os.path.join(output_dir, 'labels', split, unique_txt)
+                
+                # Copy
+                shutil.copy(src_img_path, dst_img_path)
+                
+                # Labeling
+                with open(dst_label_path, 'w') as f_out:
+                    f_out.write('\n'.join(yolo_labels))
+                
+                total_images += 1
         
     print(f"\Done! Dataset generated in '{output_dir}'.")
     print(f"All {total_images} images are in 'images/train'.")
