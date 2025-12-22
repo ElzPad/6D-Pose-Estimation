@@ -171,7 +171,7 @@ cython_debug/
 .ruff_cache/
 
 # Datasets
-datasets/
+data/
 
 # Docs
 docs/
