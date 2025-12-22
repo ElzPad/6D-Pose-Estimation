@@ -10,8 +10,10 @@ from pathlib import Path
 import zipfile
 import sys
 
-URL = "https://drive.google.com/file/d/1qQ8ZjUI6QauzFsiF8EpaaI2nKFWna_kQ/view?usp=sharing"
-OUT_DIR = Path("datasets/linemod")
+URL = (
+    "https://drive.google.com/file/d/1qQ8ZjUI6QauzFsiF8EpaaI2nKFWna_kQ/view?usp=sharing"
+)
+OUT_DIR = Path("data/linemod")
 ZIP_NAME = "Linemod_preprocessed.zip"
 
 
@@ -25,7 +27,10 @@ def main() -> int:
     try:
         import gdown
     except ImportError:
-        print("Missing dependency: gdown\nInstall it with: pip install gdown", file=sys.stderr)
+        print(
+            "Missing dependency: gdown\nInstall it with: pip install gdown",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"Downloading to: {zip_path}")
