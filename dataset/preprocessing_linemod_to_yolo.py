@@ -1,3 +1,4 @@
+import argparse
 import yaml
 import os
 import shutil
@@ -5,7 +6,6 @@ import random
 from tqdm import tqdm
 from pathlib import Path
 from PIL import Image
-
 
 # Mapping ID Linemod -> ID YOLO
 CLASS_MAPPING = {
@@ -24,45 +24,40 @@ CLASS_MAPPING = {
     15: 12
 }
 
-
 def convert_bbox_to_yolo(size, box):
     """
         We convert from [xmin, ymin, w, h] to [x_center, y_center, w, h] and then normalized
-
-        => box = [xmin, ymin, w, h]
-
 
         Parameters
             - size = image size (width, height) 
             - box = [xmin, ymin, w, h]
     """
     
-    dw = 1. / size[0] # size[0] = width
-    dh = 1. / size[1] # size[1] = height
+    img_w, img_h = size
+    dw = 1.0 / img_w
+    dh = 1.0 / img_h
 
-    x_min = box[0]
-    y_min = box[1]
-    w_pixels = box[2]
-    h_pixels = box[3]
+    x_min, y_min, w_pixels, h_pixels = map(float, box)
 
-
-    # Center coordinates (x, y)
-    x_center = x_min + w_pixels / 2.0
-    y_center = y_min + h_pixels / 2.0
-
-    # Normalization
-    x_center *= dw
+    x_center = (x_min + w_pixels / 2.0) * dw
+    y_center = (y_min + h_pixels / 2.0) * dh
     width = w_pixels * dw
-    y_center *= dh
     height = h_pixels * dh
+
+    # clamp centers (optional safety)
+    x_center = min(max(x_center, 0.0), 1.0)
+    y_center = min(max(y_center, 0.0), 1.0)
 
     return (x_center, y_center, width, height)
 
-
-
-def setup_directories(output_dir):
-    """ Creates the structure"""
+def setup_directories(output_dir, clean_output=False):
+    """
+        Creates the structure. Optionally wipe output_dir first to avoid leakage across runs.
+    """
     output_dir = Path(output_dir)
+    if clean_output and output_dir.exists():
+        shutil.rmtree(output_dir)
+    
     for split in ['train', 'val']:
         os.makedirs(os.path.join(output_dir, 'images', split), exist_ok=True)
         os.makedirs(os.path.join(output_dir, 'labels', split), exist_ok=True)
@@ -70,7 +65,42 @@ def setup_directories(output_dir):
 
     os.makedirs(os.path.join(output_dir, "models"), exist_ok=True)
 
-def process_dataset(dataset_root, output_dir, training_ratio):
+def write_data_yaml(output_dir):
+    data_yml = (
+        "path: data/linemod_yolo\n"
+        "train: images/train\n"
+        "val: images/val\n"
+        "names:\n"
+        "  - ape\n"
+        "  - benchvise\n"
+        "  - camera\n"
+        "  - can\n"
+        "  - cat\n"
+        "  - driller\n"
+        "  - duck\n"
+        "  - eggbox\n"
+        "  - glue\n"
+        "  - holepuncher\n"
+        "  - iron\n"
+        "  - lamp\n"
+        "  - phone\n"
+    )
+
+    with open(os.path.join(output_dir, "data.yml"), "w") as f:
+        f.write(data_yml)
+
+def split_frame_ids(ground_truth, train_ratio, seed):
+    rng = random.Random(seed)
+    frame_ids = sorted([int(k) for k in ground_truth.keys()])
+    rng.shuffle(frame_ids)
+
+    n_train = int(len(frame_ids) * train_ratio)
+    train_ids = set(frame_ids[:n_train])
+    val_ids = set(frame_ids[n_train:])
+
+    return train_ids, val_ids
+
+def process_dataset(dataset_root, output_dir, training_ratio=0.8, seed=42, clean_output=True):
     """
         Convert raw LINEMOD dataset into YOLO detection format.
 
@@ -80,7 +110,7 @@ def process_dataset(dataset_root, output_dir, training_ratio):
             - training_ratio: ratio between training data and validation data
     """
 
-    setup_directories(output_dir)
+    setup_directories(output_dir, clean_output=clean_output)
     root_path = Path(dataset_root)
     data_path = Path(os.path.join(root_path, 'data'))
     model_path = os.path.join(root_path, 'models')
@@ -101,12 +131,12 @@ def process_dataset(dataset_root, output_dir, training_ratio):
             print(f"ALERT: info.yml NOT FOUND in {folder.name}. I'll skip this folder")
             continue
 
-        with open(info_file, 'r') as f:
-            infos = yaml.load(f, Loader=yaml.SafeLoader)
-
         if not gt_file.exists():
             print(f"ALERT: gt.yml NOT FOUND in {folder.name}. I'll skip this folder")
             continue
+
+        with open(info_file, 'r') as f:
+            infos = yaml.load(f, Loader=yaml.SafeLoader)
 
         with open(gt_file, 'r') as f:
             # Safe open for YAML file
@@ -114,6 +144,10 @@ def process_dataset(dataset_root, output_dir, training_ratio):
 
         if not ground_truth:
             continue
+
+        # Deterministic split per object folder
+        folder_seed = seed + int(folder.name)
+        train_ids, val_ids = split_frame_ids(ground_truth, training_ratio, folder_seed)
 
         loop = tqdm(ground_truth.items(), desc=f"Proc. {folder.name}", unit="img")
     
@@ -167,13 +201,12 @@ def process_dataset(dataset_root, output_dir, training_ratio):
             # If the image contains at least one object of our interest, we save it
             if has_valid_object:
 
-                split = 'train' if random.random() < training_ratio else 'val'
+                split = 'train' if img_id in train_ids else 'val'
                 
                 # We create a unique name: foldername_imgname.png
                 # Es: 01_0000.png
                 unique_name = f"{folder.name}_{img_filename}"
                 unique_txt = unique_camera = f"{folder.name}_{img_id:04d}.txt"
-                
                 
                 dst_img_path = os.path.join(output_dir, 'images', split, unique_name)
                 dst_label_path = os.path.join(output_dir, 'labels', split, unique_txt)
@@ -190,19 +223,26 @@ def process_dataset(dataset_root, output_dir, training_ratio):
                 with open(dst_camera_intrinsics_path, 'w') as f_out:
                     f_out.write(camera_str)
                 
-                
                 total_images += 1
     
     dst_models_path = os.path.join(output_dir, 'models')
     models_info_path = os.path.join(model_path, 'models_info.yml')
     shutil.copy(models_info_path, dst_models_path)
-        
+    
+    write_data_yaml(output_dir)
+
     print(f"\Done! Dataset generated in '{output_dir}'.")
     print(f"All {total_images} images are in 'images/train'.")
 
+def main():
+    parser = argparse.ArgumentParser(description='Preprocessing Linemod dataset to YOLO input format.')
+    parser.add_argument('--no_clean_output', action="store_true", help='Do not clean the output folder before preprocessing.')
+    args = parser.parse_args()
 
-if __name__ == "__main__":
     dataset_path = "data/linemod/Linemod_preprocessed"
     output_dir = "data/linemod_yolo"
-    process_dataset(dataset_path, output_dir, 0.8)
+    process_dataset(dataset_path, output_dir, training_ratio=0.8, clean_output=not args.no_clean_output)
+
+if __name__ == "__main__":
+    main()
 
