@@ -7,4 +7,5 @@ matplotlib
 numpy
 plotly
 scikit-learn
+ultralytics
 # open3d

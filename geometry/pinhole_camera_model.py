@@ -4,11 +4,14 @@ def pinhole_translation(bbox, f_x, f_y, c_x, c_y, diameter):
     """
         Compute translation from bbox using pinhole camera model
 
-        Parameters:
+        Args:
             - bbox = [x_center, y_center, width, height]
             - f_x, f_y = focal length
             - c_x, c_y = optical center coordinates
             - diameter = diameter
+
+        Returns:
+            - translation triplet (X, Y, Z)
     """
     x_center, y_center, w, h = bbox
     bbox_diag = math.sqrt(w**2 + h**2)

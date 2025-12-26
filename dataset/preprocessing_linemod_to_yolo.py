@@ -26,11 +26,16 @@ CLASS_MAPPING = {
 
 def convert_bbox_to_yolo(size, box):
     """
-        We convert from [xmin, ymin, w, h] to [x_center, y_center, w, h] and then normalized
+        We convert from [xmin, ymin, w, h] to [x_center, y_center, w, h] 
+        and then we normalize it.
 
-        Parameters
-            - size = image size (width, height) 
-            - box = [xmin, ymin, w, h]
+        Args:
+            - size: image size (width, height) 
+            - box: [xmin, ymin, w, h]
+        
+        Returns:
+            - tuple (x_center, y_center, width, height) 
+
     """
     
     img_w, img_h = size
@@ -104,10 +109,13 @@ def process_dataset(dataset_root, output_dir, training_ratio=0.8, seed=42, clean
     """
         Convert raw LINEMOD dataset into YOLO detection format.
 
-        Parameters:
+        Args:
             - dataset_root: data/linemod/ -> linemod directory path
             - output_dir:  data/linemod_yolo/ -> output directory path
             - training_ratio: ratio between training data and validation data
+        
+        Returns:
+            - new data (preprocessed according to what YOLO needs)
     """
 
     setup_directories(output_dir, clean_output=clean_output)
