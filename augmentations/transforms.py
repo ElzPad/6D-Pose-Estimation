@@ -1,293 +1,125 @@
-import torchvision.transforms as transforms
-import torchvision.transforms.functional as TF
+from PIL import Image, ImageFilter
+import torch
 import random
 import numpy as np
-from PIL import Image
-import math
+from torchvision import transforms
 
 
-class YOLOBaseTransform(object):
-    """Base class with shared transformation methods"""
-
-    def _letterbox_resize(self, image, boxes, target_size):
-        """Resize with letterboxing to maintain aspect ratio"""
-        orig_w, orig_h = image.size
-
-        # Calculate scaling factor
-        scale = min(target_size / orig_w, target_size / orig_h)
-        new_w = int(orig_w * scale)
-        new_h = int(orig_h * scale)
-
-        # Resize image
-        image = TF.resize(image, (new_h, new_w))
-
-        # Create new image with padding
-        new_image = Image.new("RGB", (target_size, target_size), (114, 114, 114))
-
-        # Calculate padding
-        pad_w = (target_size - new_w) // 2
-        pad_h = (target_size - new_h) // 2
-
-        # Paste resized image
-        new_image.paste(image, (pad_w, pad_h))
-
-        # Adjust box coordinates for letterboxing
-        adjusted_boxes = []
-        for box in boxes:
-            class_id, x_center, y_center, width, height = box
-
-            # Scale and shift coordinates
-            new_x = (x_center * new_w + pad_w) / target_size
-            new_y = (y_center * new_h + pad_h) / target_size
-            new_w_norm = width * new_w / target_size
-            new_h_norm = height * new_h / target_size
-
-            adjusted_boxes.append([class_id, new_x, new_y, new_w_norm, new_h_norm])
-
-        return new_image, adjusted_boxes
-
-    def _normalize_image(self, image):
-        """Convert to tensor and normalize"""
-        image = TF.to_tensor(image)
-        image = TF.normalize(
-            image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        )
-        return image
-
-
-class YOLOAugmentation(YOLOBaseTransform):
-    def __init__(
-        self,
-        image_size=640,
-        scale_range=(0.8, 1.2),
-        rotation_range=(-15, 15),
-        brightness_range=(0.8, 1.2),
-        flip_prob=0.5,
-    ):
+class LineModRotationPredictionTransform(object):
+    def __init__(self, image_size=224, padding_factor=0.1, is_train=True):
         """
-        Data augmentation for YOLO object detection
+        Custom Transform class that handles:
+        1. Cropping the object using the bounding box.
+        2. Applying Safe Augmentations (Photometric only) during training.
+        3. Resizing and Normalizing for ResNet.
 
         Args:
-            image_size: Target image size (YOLO typically uses 640)
-            scale_range: Range for random scaling (min, max)
-            rotation_range: Range for random rotation in degrees (min, max)
-            brightness_range: Range for brightness adjustment (min, max)
-            flip_prob: Probability of horizontal flip
+            image_size (int): Input size for the ResNet (default 224).
+            padding_factor (float): Context around the object (default 10%).
+            is_train (bool): If True, applies random augmentations.
         """
         self.image_size = image_size
-        self.scale_range = scale_range
-        self.rotation_range = rotation_range
-        self.brightness_range = brightness_range
-        self.flip_prob = flip_prob
+        self.padding_factor = padding_factor
+        self.is_train = is_train
 
-        # Color transformations (don't affect bounding boxes)
-        self.color_jitter = transforms.ColorJitter(
-            brightness=brightness_range,
-            contrast=(0.8, 1.2),
-            saturation=(0.8, 1.2),
-        )
-
-    def __call__(self, image, boxes):
-        """
-        Apply augmentation to image and bounding boxes
-
-        Args:
-            image: PIL Image
-            boxes: List of [class_id, x_center, y_center, width, height] in YOLO format
-                   All coordinates are normalized (0-1)
-
-        Returns:
-            augmented_image: torch.Tensor
-
-            augmented_boxes: List of augmented boxes
-        """
-        # Convert boxes to list if numpy array
-        if isinstance(boxes, np.ndarray):
-            boxes = boxes.tolist()
-
-        # Track original image size
-        orig_w, orig_h = image.size
-
-        # 1. Random horizontal flip
-        if random.random() < self.flip_prob:
-            image = TF.hflip(image)
-            boxes = self._flip_boxes(boxes)
-
-        # 2. Random rotation
-        angle = random.uniform(*self.rotation_range)
-        if abs(angle) > 0.1:
-            image, boxes = self._rotate_image_boxes(image, boxes, angle)
-
-        # 3. Random scaling
-        scale = random.uniform(*self.scale_range)
-        if abs(scale - 1.0) > 0.01:
-            new_w = int(orig_w * scale)
-            new_h = int(orig_h * scale)
-            image = TF.resize(image, (new_h, new_w))
-            # Boxes remain normalized, so no adjustment needed
-
-        # 4. Color augmentation (doesn't affect boxes)
-        image = self.color_jitter(image)
-
-        # 5. Resize to target size (letterbox to maintain aspect ratio)
-        image, boxes = self._letterbox_resize(image, boxes, self.image_size)
-
-        # 6. Convert to tensor and normalize
-        image = self._normalize_image(image)
-
-        # Filter out invalid boxes
-        boxes = self._filter_boxes(boxes)
-
-        return image, boxes
-
-    def _flip_boxes(self, boxes):
-        """Flip bounding boxes horizontally"""
-        flipped = []
-        for box in boxes:
-            class_id, x_center, y_center, width, height = box
-            # Flip x_center: new_x = 1 - x
-            flipped.append([class_id, 1.0 - x_center, y_center, width, height])
-        return flipped
-
-    def _rotate_image_boxes(self, image, boxes, angle):
-        """Rotate image and adjust bounding boxes"""
-        # Rotate image
-        image = TF.rotate(image, angle, fill=0)
-
-        w, h = image.size
-        angle_rad = math.radians(angle)
-        cos_a = math.cos(angle_rad)
-        sin_a = math.sin(angle_rad)
-
-        rotated_boxes = []
-        for box in boxes:
-            class_id, x_center, y_center, width, height = box
-
-            # Convert to absolute coordinates
-            x_abs = x_center * w
-            y_abs = y_center * h
-            w_abs = width * w
-            h_abs = height * h
-
-            # Get corner points
-            corners = [
-                [x_abs - w_abs / 2, y_abs - h_abs / 2],
-                [x_abs + w_abs / 2, y_abs - h_abs / 2],
-                [x_abs + w_abs / 2, y_abs + h_abs / 2],
-                [x_abs - w_abs / 2, y_abs + h_abs / 2],
-            ]
-
-            # Rotate corners around center
-            cx, cy = w / 2, h / 2
-            rotated_corners = []
-            for x, y in corners:
-                # Translate to origin
-                x_t = x - cx
-                y_t = y - cy
-                # Rotate
-                x_r = x_t * cos_a - y_t * sin_a
-                y_r = x_t * sin_a + y_t * cos_a
-                # Translate back
-                rotated_corners.append([x_r + cx, y_r + cy])
-
-            # Get new bounding box from rotated corners
-            xs = [c[0] for c in rotated_corners]
-            ys = [c[1] for c in rotated_corners]
-
-            x_min, x_max = min(xs), max(xs)
-            y_min, y_max = min(ys), max(ys)
-
-            new_x_center = (x_min + x_max) / 2 / w
-            new_y_center = (y_min + y_max) / 2 / h
-            new_width = (x_max - x_min) / w
-            new_height = (y_max - y_min) / h
-
-            rotated_boxes.append(
-                [class_id, new_x_center, new_y_center, new_width, new_height]
+        # We use photometric transforms that do NOT change the 3D orientation.
+        if self.is_train:
+            self.color_jitter = transforms.ColorJitter(
+                brightness=0.25,  # Randomly adjust brightness
+                contrast=0.25,  # Randomly adjust contrast
+                saturation=0.25,  # Randomly adjust saturation
+                hue=0.05,  # Slight hue shift
             )
 
-        return image, rotated_boxes
+        # 2. Resizing and Normalization (Common to both)
+        # Standard ImageNet statistics
+        self.normalize = transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                ),
+            ]
+        )
 
-    def _filter_boxes(self, boxes, min_area=0.001):
-        """Remove boxes that are too small or out of bounds"""
-        filtered = []
-        for box in boxes:
-            class_id, x_center, y_center, width, height = box
-
-            # Check if box is within bounds and has reasonable size
-            if (
-                0 <= x_center <= 1
-                and 0 <= y_center <= 1
-                and width * height > min_area
-                and width < 1.0
-                and height < 1.0
-            ):
-                filtered.append(box)
-
-        return filtered
-
-
-class YOLOValidationTransform(YOLOBaseTransform):
-    def __init__(self, image_size=640):
+    def _crop(self, image, bbox):
         """
-        Validation transforms for YOLO (no augmentation, only resize)
+        Helper to crop the object from the full image with padding.
+        """
+        w_img, h_img = image.size
+        xmin, ymin, xmax, ymax = bbox
 
+        # Calculate padding
+        w_box = xmax - xmin
+        h_box = ymax - ymin
+        pad_x = int(w_box * self.padding_factor)
+        pad_y = int(h_box * self.padding_factor)
+
+        # Apply padding respecting image bounds
+        x1 = max(0, xmin - pad_x)
+        y1 = max(0, ymin - pad_y)
+        x2 = min(w_img, xmax + pad_x)
+        y2 = min(h_img, ymax + pad_y)
+
+        # Crop returns a copy
+        return image.crop((x1, y1, x2, y2))
+
+    def _add_noise(self, image):
+        """
+        Adds random Gaussian noise to the PIL image.
+        """
+        img_arr = np.array(image)
+        # Random noise sigma between 0 and 10
+        sigma = np.random.uniform(0, 10.0)
+        noise = np.random.normal(0, sigma, img_arr.shape)
+        noisy_img = np.clip(img_arr + noise, 0, 255).astype(np.uint8)
+        return Image.fromarray(noisy_img)
+
+    def __call__(self, image, bbox):
+        """
         Args:
-            image_size: Target image size
-        """
-        self.image_size = image_size
-
-    def __call__(self, image, boxes):
-        """
-        Apply validation transforms to image and bounding boxes
-
-        Args:
-            image: PIL Image
-            boxes: List of [class_id, x_center, y_center, width, height] in YOLO format
-
+            image (PIL.Image or numpy array): The full input image.
+            bbox (list): [xmin, ymin, xmax, ymax].
         Returns:
-            transformed_image: torch.Tensor
-            boxes: Adjusted boxes (if letterboxing is applied)
+            torch.Tensor: The final processed tensor.
         """
-        # Convert boxes to list if numpy array
-        if isinstance(boxes, np.ndarray):
-            boxes = boxes.tolist()
+        # Ensure input is PIL
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
 
-        # Letterbox resize (same as training for consistency)
-        image, boxes = self._letterbox_resize(image, boxes, self.image_size)
+        # 1. Crop Object
+        # Note: We rely on the provided bbox. We do not perturb the bbox here
+        # because significant shifts would effectively change the camera's center
+        # of projection relative to the object, slightly invalidating the pose.
+        crop = self._crop(image, bbox)
 
-        # Convert to tensor and normalize
-        image = self._normalize_image(image)
+        # 2. Augment (Train only)
+        if self.is_train:
+            # A. Color Jitter (80% chance)
+            if random.random() < 0.8:
+                crop = self.color_jitter(crop)
 
-        return image, boxes
+            # B. Gaussian Blur (50% chance) - Simulates out-of-focus camera
+            if random.random() < 0.5:
+                # Random radius between 0 and 2.0
+                radius = random.uniform(0.1, 2.0)
+                crop = crop.filter(ImageFilter.GaussianBlur(radius=radius))
+
+            # C. Gaussian Noise (30% chance) - Simulates sensor noise
+            if random.random() < 0.3:
+                crop = self._add_noise(crop)
+
+        # 3. Normalize & Resize
+        crop = self.normalize(crop)
+
+        return crop
 
 
-def get_train_transforms(image_size=640):
-    """Returns augmentation transforms for YOLO training"""
-    return YOLOAugmentation(image_size=image_size)
+# Helper functions for clean import in dataset.py
+def get_train_transforms(image_size=224):
+    return LineModRotationPredictionTransform(image_size=image_size, is_train=True)
 
 
-def get_val_transforms(image_size=640):
-    """Returns transforms for YOLO validation (no augmentation)"""
-    return YOLOValidationTransform(image_size=image_size)
-
-
-# Example usage:
-if __name__ == "__main__":
-
-    # Initialize transforms
-    train_transform = get_train_transforms(image_size=640)
-    val_transform = get_val_transforms(image_size=640)
-
-    # Load image and annotations
-    # image = Image.open("tree.jpg")
-    # boxes = [
-    #     [0, 0.5, 0.5, 0.3, 0.4],  # class_id, x_center, y_center, width, height
-    #     [1, 0.3, 0.3, 0.2, 0.2],
-    # ]
-
-    # Apply training augmentation
-    # train_image, train_boxes = train_transform(image, boxes)
-
-    # Apply validation transform
-    # val_image, val_boxes = val_transform(image, boxes)
+def get_val_transforms(image_size=224):
+    return LineModRotationPredictionTransform(image_size=image_size, is_train=False)
