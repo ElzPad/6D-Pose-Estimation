@@ -3,10 +3,12 @@ import os
 import yaml
 import tqdm
 import torch
+import json
 import cv2
 import numpy as np
 
 from geometry import pinhole_translation, quaternion_to_rotation_matrix
+from torch.utils.data import DataLoader
 
 # Mapping: YOLO Class ID (0-12) -> LINEMOD Object ID (1-15)
 YOLO_TO_LINEMOD_ID = {
@@ -30,6 +32,10 @@ def get_args():
     parser.add_argument('--resnet_weights', type=str, required=True, help="Path to resnet.pth")
     parser.add_argument('--batch_size', type=int, default=32, help="Batch size for inference")
     parser.add_argument('--device', type=str, default='cuda', help="Device (cuda/cpu)")
+
+    # Output arguments
+    parser.add_argument('--output_file', type=str, default='results.json', 
+                        help="Path to save the output JSON file")
     
     return parser.parse_args()
 
@@ -64,6 +70,22 @@ def load_diameters(path):
     # CONVERTION TO METERS IS DONE SINCE THAT IS THE STANDARD UNIT FOR 6D POSE ESTIMATION
     # ===================================================================================
     return {int(k): v['diameter'] / 1000.0 for k, v in data.items()}
+
+def save_results(results, output_path):
+    """
+    Saves the list of dictionaries to a JSON file.
+    """
+    print(f"Saving {len(results)} predictions to {output_path}...")
+    
+    # Ensure the directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        
+    with open(output_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    print("Save complete.")
 
 
 def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
@@ -181,7 +203,10 @@ def main():
     all_poses = run_inference(dataloader, yolo_model, resnet_model, diameters, device)
     
     print(f"Done. Processed {len(all_poses)} poses.")
-    # Add saving logic here (e.g., json.dump(all_poses, open('results.json', 'w')))
+    
+    # 4. Save Results
+    save_results(all_poses, args.output_file)
+    
 
 if __name__ == "__main__":
     main()
