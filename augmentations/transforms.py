@@ -50,19 +50,17 @@ class LineModRotationPredictionTransform(object):
         w_img, h_img = image.size
         xmin, ymin, xmax, ymax = bbox
 
-        # Calculate padding
+        # padding
         w_box = xmax - xmin
         h_box = ymax - ymin
         pad_x = int(w_box * self.padding_factor)
         pad_y = int(h_box * self.padding_factor)
 
-        # Apply padding respecting image bounds
         x1 = max(0, xmin - pad_x)
         y1 = max(0, ymin - pad_y)
         x2 = min(w_img, xmax + pad_x)
         y2 = min(h_img, ymax + pad_y)
 
-        # Crop returns a copy
         return image.crop((x1, y1, x2, y2))
 
     def _add_noise(self, image):
@@ -70,7 +68,7 @@ class LineModRotationPredictionTransform(object):
         Adds random Gaussian noise to the PIL image.
         """
         img_arr = np.array(image)
-        # Random noise sigma between 0 and 10
+
         sigma = np.random.uniform(0, 10.0)
         noise = np.random.normal(0, sigma, img_arr.shape)
         noisy_img = np.clip(img_arr + noise, 0, 255).astype(np.uint8)
@@ -84,39 +82,34 @@ class LineModRotationPredictionTransform(object):
         Returns:
             torch.Tensor: The final processed tensor.
         """
-        # Ensure input is PIL
         if not isinstance(image, Image.Image):
             image = Image.fromarray(image)
 
-        # 1. Crop Object
-        # Note: We rely on the provided bbox. We do not perturb the bbox here
-        # because significant shifts would effectively change the camera's center
-        # of projection relative to the object, slightly invalidating the pose.
+        # crop
         crop = self._crop(image, bbox)
 
-        # 2. Augment (Train only)
+        # augment (Train only)
         if self.is_train:
-            # A. Color Jitter (80% chance)
+            # color Jitter (80% chance)
             if random.random() < 0.8:
                 crop = self.color_jitter(crop)
 
-            # B. Gaussian Blur (50% chance) - Simulates out-of-focus camera
+            # Gaussian Blur (50% chance) - Simulates out-of-focus camera
             if random.random() < 0.5:
                 # Random radius between 0 and 2.0
                 radius = random.uniform(0.1, 2.0)
                 crop = crop.filter(ImageFilter.GaussianBlur(radius=radius))
 
-            # C. Gaussian Noise (30% chance) - Simulates sensor noise
+            # Gaussian Noise (30% chance) - Simulates sensor noise
             if random.random() < 0.3:
                 crop = self._add_noise(crop)
 
-        # 3. Normalize & Resize
+        # Normalize & Resize
         crop = self.normalize(crop)
 
         return crop
 
 
-# Helper functions for clean import in dataset.py
 def get_train_transforms(image_size=224):
     return LineModRotationPredictionTransform(image_size=image_size, is_train=True)
 
