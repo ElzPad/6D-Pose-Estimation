@@ -7,8 +7,11 @@ import json
 import cv2
 import numpy as np
 
+from ultralytics import YOLO
 from geometry import pinhole_translation, quaternion_to_rotation_matrix
+from linemod_dataset import LinemodDataset
 from torch.utils.data import DataLoader
+from augmentations import get_val_transforms
 
 # Mapping: YOLO Class ID (0-12) -> LINEMOD Object ID (1-15)
 YOLO_TO_LINEMOD_ID = {
@@ -95,7 +98,7 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
     2. Pinhole Translate
     3. ResNet Rotate
     """
-
+    transformer = get_val_transforms(image_size=224)
     results = []
     yolo_model.eval()
     resnet_model.eval()
@@ -144,7 +147,7 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
                 # --- 4. Rotation (ResNet) ---
                 # Preprocess patch (crop & resize)
                 # Pass the numpy image and the bbox
-                patch = preprocess_patch(img_np, bbox).to(device) #TODO: implementare preprocess_patch (crop sulla bbox)
+                patch = transformer(img_np, bbox).to(device)
 
 
                 with torch.no_grad():
@@ -192,7 +195,7 @@ def main():
     # 2. Load Models
     print("Loading models...")
     # Ensure these load functions handle putting model on `device` if needed
-    yolo_model = load_yolo(args.yolo_weights) # TODO
+    yolo_model = YOLO(args.yolo_weights)
     # If yolo needs to be explicitly moved:
     if hasattr(yolo_model, 'to'):
         yolo_model.to(device)
