@@ -24,7 +24,7 @@ class LineModRotationDataset(Dataset):
         - Applies specific transformations (augmentation/normalization) based on the split.
     """
 
-    def __init__(self, root_dir, object_id, split="train", split_percentage=0.15):
+    def __init__(self, root_dir, object_id, split="train", split_percentage=0.8):
         """
         Args:
             root_dir (str): Path to LINEMOD root.
