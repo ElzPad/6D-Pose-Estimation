@@ -6,7 +6,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train YOLO model on Linemod dataset.")
     parser.add_argument("--dataset_yaml", type=str, default="data\linemod_yolo\data.yml",
                         help="Path to the YOLO dataset config file.")
-    parser.add_argument("--model", type=str, default="yolov8s.pt", help="Pretrained YOLO model name.")
+    parser.add_argument("--model", type=str, default="yolo11s.pt", help="Pretrained YOLO model name.")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
     parser.add_argument("--batch", type=int, default=16, help="Batch size for training.")
     parser.add_argument("--imgsz", type=int, default=640, help="Image size for training.")
@@ -33,17 +33,18 @@ def main():
         # Dataset augmentation
         degrees=10.0,      # Rotate +/- 10 degrees
         translate=0.1,     # Translate +/- 10%
-        scale=0.5,         # Scale gain +/- 50%
+        scale=0.4,         # Scale gain +/- 40%
         fliplr=0.0,        # LINEMOD objects are not symmetric in 2D, so be careful with flip!
         hsv_h=0.015,       # Color jitter (Hue)
         hsv_s=0.7,         # Color jitter (Saturation)
         hsv_v=0.4,         # Color jitter (Value)
-        mosaic=1.0,        # Probability of mosaic (VERY IMPORTANT)
+        mosaic=0.5,        # Probability of mosaic (VERY IMPORTANT)
 
         # Optional: keep things simple / stable
         pretrained= True,
+        save_period=5,
         optimizer="AdamW",
-        lr0=1e-3,
+        lr0=5e-4,
     )
 
 if __name__ == "__main__":
