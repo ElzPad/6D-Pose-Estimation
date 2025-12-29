@@ -9,9 +9,10 @@ import numpy as np
 
 from ultralytics import YOLO
 from geometry import pinhole_translation, quaternion_to_rotation_matrix
-from linemod_dataset import LinemodDataset
+from dataset.linemod_dataset import LinemodDataset
 from torch.utils.data import DataLoader
 from augmentations import get_val_transforms
+from utils import _parse_single_result, load_yolo
 
 # Mapping: YOLO Class ID (0-12) -> LINEMOD Object ID (1-15)
 YOLO_TO_LINEMOD_ID = {
@@ -91,7 +92,7 @@ def save_results(results, output_path):
     print("Save complete.")
 
 
-def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
+def run_inference(dataloader, yolo_model, resnet_model, diameters,device):
     """
     Main pipeline loop:
     1. YOLO Detect
@@ -110,7 +111,8 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
 
         # --- 1. YOLO Stage ---
         # Returns list of detections per image: [[class_id, x, y, w, h], ...]
-        batch_detections = get_yolo_batch_detections(yolo_model, images_tensor) # TODO: Da implementare
+        yolo_results = yolo_model(images_tensor, verbose=False)
+        batch_detections = list(map(_parse_single_result, yolo_results))
 
         # --- 2. Instance Processing ---
         for i, detections in enumerate(batch_detections):
@@ -130,7 +132,7 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
             img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR) 
 
             for det in detections:
-                cls_id, x_c, y_c, w, h = det
+                x_c, y_c, w, h, cls_id = det
 
                 # Retrieve diameter based on class ID
                 linemod_id = YOLO_TO_LINEMOD_ID.get(int(cls_id))
@@ -195,12 +197,12 @@ def main():
     # 2. Load Models
     print("Loading models...")
     # Ensure these load functions handle putting model on `device` if needed
-    yolo_model = YOLO(args.yolo_weights)
+    yolo_model = load_yolo(args.yolo_weights)
     # If yolo needs to be explicitly moved:
     if hasattr(yolo_model, 'to'):
         yolo_model.to(device)
         
-    resnet_model = load_resnet(args.resnet_weights).to(device) # TODO
+    resnet_model = load_resnet(args.resnet_weights).to(device) # TODO: wrap torch.load()
 
     # 3. Execution
     all_poses = run_inference(dataloader, yolo_model, resnet_model, diameters, device)
