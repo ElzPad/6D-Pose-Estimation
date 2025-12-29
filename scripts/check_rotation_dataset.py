@@ -24,8 +24,8 @@ def parse_args():
     parser.add_argument(
         "--obj_id",
         type=str,
-        default="05",
-        help="Object ID to verify (e.g., '05' or '5').",
+        default=None,
+        help="Object ID to verify (e.g., '05' or '5'). Default to None",
     )
 
     # Visualization Parameters
