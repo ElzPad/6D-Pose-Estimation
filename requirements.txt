@@ -1,12 +1,12 @@
 gdown
+matplotlib
+numpy<2
+opencv-python
+Pillow
+plotly
 PyYAML
+scikit-learn
 torch
 torchvision
-Pillow
-matplotlib
-numpy
-plotly
-scikit-learn
-opencv-python
 ultralytics
 # open3d

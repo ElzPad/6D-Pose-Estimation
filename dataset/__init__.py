@@ -1,1 +1,1 @@
-from .linemod_rotation_dataset import LineModRotationDataset
+from dataset.linemod_rotation_dataset import LineModRotationDataset
