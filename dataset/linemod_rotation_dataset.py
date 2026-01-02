@@ -10,14 +10,12 @@ from tqdm import tqdm
 
 
 class LineModRotationDataset(Dataset):
-    """LineMod dataset for object's rotation prediction task"""
-
     """
     A PyTorch Dataset for object's rotation prediction task on LINEMODE dataset.
-    
+
     This dataset loads RGB images, crops the object using Ground Truth bounding boxes,
     and returns the cropped image tensor along with its 3D rotation represented as a quaternion.
-    
+
     Data Loading Strategy:
         - Parses 'gt.yml' to find all annotations for the specific object ID (if provided).
         - Pre-loads all processed tensors into memory during initialization.

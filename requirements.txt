@@ -9,4 +9,5 @@ scikit-learn
 torch
 torchvision
 ultralytics
+trimesh
 # open3d
