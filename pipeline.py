@@ -12,7 +12,9 @@ from geometry import pinhole_translation, quaternion_to_rotation_matrix
 from dataset.linemod_dataset import LinemodDataset
 from torch.utils.data import DataLoader
 from augmentations import get_val_transforms
-from utils import _parse_single_result, load_yolo
+from utils import _parse_single_result
+from models.yolo.load import load_yolo
+from models.resnet.load import load_resnet
 
 # Mapping: YOLO Class ID (0-12) -> LINEMOD Object ID (1-15)
 YOLO_TO_LINEMOD_ID = {
@@ -249,9 +251,7 @@ def main():
     if hasattr(yolo_model, "to"):
         yolo_model.to(device)
 
-    resnet_model = load_resnet(args.resnet_weights).to(
-        device
-    )  # TODO: wrap torch.load()
+    resnet_model = load_resnet(args.resnet_weights, device)
 
     # 3. Execution
     all_poses = run_inference(dataloader, yolo_model, resnet_model, diameters, device)
