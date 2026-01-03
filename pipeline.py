@@ -13,7 +13,6 @@ from geometry.quaternion_to_rotation_matrix import quaternion_to_matrix
 from dataset.linemod_dataset import LinemodDataset
 from torch.utils.data import DataLoader
 from augmentations import get_val_transforms
-from utils import _parse_single_result
 from models.yolo.load import load_yolo
 from models.resnet.load import load_resnet
 
@@ -133,6 +132,43 @@ def save_results(results, output_path):
 
     print("Save complete.")
 
+def parse_yolo_result(result):
+    """
+    Parses YOLO result and filters to keep ONLY the best (highest confidence) 
+    bounding box for each distinct class ID found in the image.
+    """
+    if result.boxes.shape[0] == 0:
+        return []
+
+    # 1. Extract data to CPU numpy
+    boxes = result.boxes.xywh.cpu().numpy()  # (N, 4)
+    classes = result.boxes.cls.cpu().numpy() # (N,)
+    confs = result.boxes.conf.cpu().numpy()  # (N,) # BEST w.r.t this value
+
+    # 2. Filter: Keep only the best box per class
+    unique_classes = np.unique(classes)
+    keep_indices = []
+
+    for cls in unique_classes:
+        # Find all indices where the class matches
+        cls_indices = np.where(classes == cls)[0]
+        
+        # Find the index (within the subset) that has the maximum confidence
+        best_idx_subset = np.argmax(confs[cls_indices])
+        
+        # Map back to the global index
+        best_idx_global = cls_indices[best_idx_subset]
+        keep_indices.append(best_idx_global)
+
+    # 3. Apply filter
+    boxes = boxes[keep_indices]
+    classes = classes[keep_indices]
+
+    # 4. Stack and return [xc, yc, w, h, class_id]
+    # We strictly respect the order expected by your pipeline
+    detections = np.column_stack((boxes, classes))
+    
+    return detections.tolist()
 
 def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
     """
@@ -148,13 +184,12 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
     print(f"Running inference on {len(dataloader.dataset)} images...")
 
     for batch_images, batch_targets in tqdm(dataloader):
-
         images_tensor = torch.stack(batch_images).to(device)
 
         # --- 1. YOLO Stage ---
         # Returns list of detections per image: [[class_id, x, y, w, h], ...]
-        yolo_results = yolo_model(images_tensor, verbose=False)
-        batch_detections = list(map(_parse_single_result, yolo_results))
+        yolo_results = yolo_model(images_tensor)
+        batch_detections = list(map(parse_yolo_result, yolo_results))
 
         # --- 2. Instance Processing ---
         for i, detections in enumerate(batch_detections):
