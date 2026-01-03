@@ -112,8 +112,8 @@ def load_diameters(path):
     # ===================================================================================
     # CONVERTION TO METERS IS DONE SINCE THAT IS THE STANDARD UNIT FOR 6D POSE ESTIMATION
     # ===================================================================================
-    return {int(k): v["diameter"] / 1000.0 for k, v in data.items()}
-    # return {int(k): v['diameter'] for k, v in data.items()} # keep it as mm
+    #return {int(k): v["diameter"] / 1000.0 for k, v in data.items()}
+    return {int(k): v['diameter'] for k, v in data.items()} # keep it as mm
 
 
 def save_results(results, output_path):
