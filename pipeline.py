@@ -8,7 +8,8 @@ import cv2
 import numpy as np
 
 from ultralytics import YOLO
-from geometry import pinhole_translation, quaternion_to_rotation_matrix
+from geometry.pinhole_camera_model import pinhole_translation
+from geometry.quaternion_to_rotation_matrix import quaternion_to_matrix
 from dataset.linemod_dataset import LinemodDataset
 from torch.utils.data import DataLoader
 from augmentations import get_val_transforms
@@ -201,7 +202,7 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
 
                 # Normalize and convert
                 q_pred = q_pred / torch.norm(q_pred)
-                R_pred = quaternion_to_rotation_matrix(q_pred)
+                R_pred = quaternion_to_matrix(q_pred)
 
                 # Save Result
                 results.append(
