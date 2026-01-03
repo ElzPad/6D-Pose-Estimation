@@ -48,11 +48,11 @@ class LineModRotationPredictionTransform(object):
         Helper to crop the object from the full image with padding.
         """
         w_img, h_img = image.size
-        xmin, ymin, xmax, ymax = bbox
+        x_center, y_center, w_box, h_box = bbox
 
-        # padding
-        w_box = xmax - xmin
-        h_box = ymax - ymin
+        xmin, xmax = x_center - w_box/2, x_center + w_box/2
+        ymin, ymax = y_center - h_box/2, y_center + h_box/2
+
         pad_x = int(w_box * self.padding_factor)
         pad_y = int(h_box * self.padding_factor)
 
@@ -60,7 +60,7 @@ class LineModRotationPredictionTransform(object):
         y1 = max(0, ymin - pad_y)
         x2 = min(w_img, xmax + pad_x)
         y2 = min(h_img, ymax + pad_y)
-
+        
         return image.crop((x1, y1, x2, y2))
 
     def _add_noise(self, image):
@@ -78,7 +78,7 @@ class LineModRotationPredictionTransform(object):
         """
         Args:
             image (PIL.Image or numpy array): The full input image.
-            bbox (list): [xmin, ymin, xmax, ymax].
+            bbox (list): [x_center, y_center, w_box, h_box].
         Returns:
             torch.Tensor: The final processed tensor.
         """

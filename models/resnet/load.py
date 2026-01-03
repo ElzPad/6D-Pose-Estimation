@@ -1,5 +1,5 @@
 import torch
-from resnet import ResNetRotation
+from .train import ResNetRotation
 
 def load_resnet(weights_path, device='cpu', freeze_backbone=False):
     """
@@ -11,7 +11,7 @@ def load_resnet(weights_path, device='cpu', freeze_backbone=False):
     
     # 2. Load the checkpoint
     # map_location ensures we can load CUDA-trained weights on CPU if needed
-    checkpoint = torch.load(weights_path, map_location=device)
+    checkpoint = torch.load(weights_path, map_location=device, weights_only=True)
     
     # 3. Extract the weights 
     if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
