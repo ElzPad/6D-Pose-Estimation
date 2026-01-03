@@ -1,7 +1,7 @@
 import argparse
 import os
 import yaml
-import tqdm
+from tqdm import tqdm
 import torch
 import json
 import cv2
