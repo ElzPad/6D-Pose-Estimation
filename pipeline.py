@@ -223,8 +223,16 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, device):
                 # --- 3. Translation (Geometry) ---
                 bbox = (x_c, y_c, w, h)
 
-                # Ensure K is in the format your geometry module expects
-                t_pred = pinhole_translation(*bbox, K, obj_diameter)
+                # Extract camera intrinsics from K matrix
+                # K = [[f_x,  0, c_x],
+                #      [ 0, f_y, c_y],
+                #      [ 0,  0,  1]]
+                f_x = K[0, 0]
+                f_y = K[1, 1]
+                c_x = K[0, 2]
+                c_y = K[1, 2]
+            
+                t_pred = pinhole_translation(bbox, f_x, f_y, c_x, c_y, obj_diameter)
 
                 # --- 4. Rotation (ResNet) ---
                 # Preprocess patch (crop & resize)
