@@ -34,8 +34,6 @@ def get_args():
     parser.add_argument("--linemod_orig_root", type=str, default="data/linemod/Linemod_preprocessed")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
     parser.add_argument("--models_info", type=str, default="data/linemod_yolo/models/models_info.yml")
-    
-    # ADDED: Argument for models directory
     parser.add_argument("--models_dir", type=str, default="data/linemod/Linemod_preprocessed/models", 
                         help="Path to directory containing .ply files")
 
@@ -154,9 +152,14 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
                 f_x, f_y = K[0, 0], K[1, 1]
                 c_x, c_y = K[0, 2], K[1, 2]
             
-                # Returns numpy array
-                t_pred_np = pinhole_translation(bbox, f_x, f_y, c_x, c_y, obj_diameter)
-                
+                # [FIXED] Unpack the tuple result from pinhole_translation
+                # assuming first element is the translation vector 't'
+                pinhole_res = pinhole_translation(bbox, f_x, f_y, c_x, c_y, obj_diameter)
+                if isinstance(pinhole_res, tuple):
+                    t_pred_np = pinhole_res[0]
+                else:
+                    t_pred_np = pinhole_res
+
                 # Convert to Tensor for metrics!
                 t_pred_tensor = torch.from_numpy(t_pred_np).float().to(device).view(3, 1)
 
@@ -169,7 +172,6 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
                 R_pred = quaternion_to_matrix(q_pred).squeeze(0) # Ensure (3,3)
 
                 # 5. Metrics
-                # Ensure mesh is loaded
                 if linemod_id not in meshes:
                     continue
                     
@@ -190,7 +192,7 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
                     "file": filename,
                     "obj_id": linemod_id,
                     "R": R_pred.cpu().numpy().tolist(),
-                    "t": t_pred_np.flatten().tolist(), # Save numpy version to JSON
+                    "t": t_pred_np.flatten().tolist(), 
                     "error": err
                 })
 
@@ -209,7 +211,6 @@ def main():
     print("Loading data...")
     diameters = load_diameters(args.models_info)
     
-    # ADDED: Load meshes here
     meshes = load_meshes(args.models_dir)
 
     dataset = LinemodInferenceDataset(
@@ -234,7 +235,7 @@ def main():
 
     resnet_model = load_resnet(args.resnet_weights, device)
 
-    # FIXED: Passed 'meshes' to the function
+    # Correct argument order: diameters -> meshes -> device
     all_poses = run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, device)
 
     print(f"Done. Processed {len(all_poses)} poses.")
