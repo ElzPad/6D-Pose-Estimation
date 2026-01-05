@@ -155,10 +155,7 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
                 # [FIXED] Unpack the tuple result from pinhole_translation
                 # assuming first element is the translation vector 't'
                 pinhole_res = pinhole_translation(bbox, f_x, f_y, c_x, c_y, obj_diameter)
-                if isinstance(pinhole_res, tuple):
-                    t_pred_np = pinhole_res[0]
-                else:
-                    t_pred_np = pinhole_res
+                t_pred_np = np.asarray(pinhole_res)
 
                 # Convert to Tensor for metrics!
                 t_pred_tensor = torch.from_numpy(t_pred_np).float().to(device).view(3, 1)
