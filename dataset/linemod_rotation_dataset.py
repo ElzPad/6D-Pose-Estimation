@@ -11,36 +11,23 @@ from tqdm import tqdm
 
 class LineModRotationDataset(Dataset):
     """
-    A PyTorch Dataset for object rotation prediction on the LINEMOD dataset.
-
-    Improvements:
-    1. Lazy Loading: Images are loaded in __getitem__ to prevent RAM explosion.
-    2. Dynamic Augmentation: Transforms are applied per-epoch, ensuring variation.
-    3. Robustness: Added checks for file existence and valid annotations.
+    High-RAM Version: Pre-loads all raw images into memory to avoid Disk I/O.
+    Transforms (augmentation) are applied dynamically in __getitem__.
     """
 
     def __init__(self, root_dir, object_id, split="train", split_percentage=0.8):
-        """
-        Args:
-            root_dir (str): Path to LINEMOD root.
-            object_id (str or int, optional): Object ID to train on (e.g., '5').
-                                              If None, loads ALL detected objects.
-            split (str): 'train' or 'test'.
-            split_percentage (float): Fraction of images used for training.
-        """
         self.root_dir = root_dir
         self.split = split
         self.split_percentage = split_percentage
 
-        # Select transforms based on split
-        # Note: We store the transform function to call it later in __getitem__
+        # Define transforms (will be applied in __getitem__)
         if split == "train":
             self.transform = get_train_transforms(image_size=224)
         else:
             self.transform = get_val_transforms(image_size=224)
 
-        # Metadata storage (Lightweight: just paths and numbers)
-        self.metadata = []
+        # The buffer will store dictionaries containing raw numpy images and metadata
+        self.memory_buffer = []
         self.target_object_ids = []
 
         # 1. Identify Target Objects
@@ -48,7 +35,6 @@ class LineModRotationDataset(Dataset):
             if os.path.exists(root_dir):
                 for d in os.listdir(root_dir):
                     dir_path = os.path.join(root_dir, d)
-                    # Check if valid object folder with gt.yml
                     if os.path.isdir(dir_path) and os.path.exists(
                         os.path.join(dir_path, "gt.yml")
                     ):
@@ -63,38 +49,33 @@ class LineModRotationDataset(Dataset):
         else:
             self.target_object_ids = [int(object_id)]
 
-        # 2. Scan Files & Build Metadata Index
+        # 2. Load Everything into RAM
+        print("Pre-loading images into RAM... (This may take a while)")
         for obj_id in self.target_object_ids:
-            self._scan_object_files(obj_id)
+            self._preload_object(obj_id)
 
-        print(f"[{split.upper()}] Total samples indexed: {len(self.metadata)}")
+        print(
+            f"[{split.upper()}] Total samples loaded in RAM: {len(self.memory_buffer)}"
+        )
 
-    def _scan_object_files(self, obj_id):
+    def _preload_object(self, obj_id):
         """
-        Scans directory for a specific object and adds valid frame metadata to self.metadata.
-        Does NOT load images into memory.
+        Loads images and annotations for a specific object into self.memory_buffer.
         """
-        # Handle folder naming '05' vs '5'
         str_id_padded = f"{obj_id:02d}"
         obj_folder = os.path.join(self.root_dir, str_id_padded)
         if not os.path.exists(obj_folder):
             obj_folder = os.path.join(self.root_dir, str(obj_id))
-            if not os.path.exists(obj_folder):
-                print(f"Warning: Folder for object {obj_id} not found.")
-                return
 
         rgb_folder = os.path.join(obj_folder, "rgb")
         gt_path = os.path.join(obj_folder, "gt.yml")
 
         if not os.path.exists(gt_path):
-            print(f"Warning: GT file not found for object {obj_id}, skipping.")
             return
 
-        # Load GT YAML (Small enough to fit in memory)
         with open(gt_path, "r") as f:
             gt_data = yaml.safe_load(f)
 
-        # Split logic
         all_indices = sorted([int(k) for k in gt_data.keys()])
         split_cutoff = int(len(all_indices) * self.split_percentage)
 
@@ -103,17 +84,26 @@ class LineModRotationDataset(Dataset):
         else:
             target_indices = all_indices[split_cutoff:]
 
-        # Iterate and store metadata
-        # We assume every frame in GT has a corresponding image.
-        for frame_id in target_indices:
+        # Iterate and load
+        for frame_id in tqdm(target_indices, desc=f"Loading Obj {obj_id}", leave=False):
             img_name = f"{frame_id:04d}.png"
             img_path = os.path.join(rgb_folder, img_name)
 
-            # Quick check if file exists (avoids crashes later)
             if not os.path.exists(img_path):
                 continue
 
-            # Find annotation for the specific object ID in this frame
+            # --- RAM INTENSIVE PART ---
+            # Load the raw image immediately
+            image = cv2.imread(img_path)
+            if image is None:
+                continue
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            # --------------------------
+
+            # Find annotation
+            if frame_id not in gt_data:
+                continue
+
             anns = gt_data[frame_id]
             target_ann = None
             for ann in anns:
@@ -124,59 +114,46 @@ class LineModRotationDataset(Dataset):
             if target_ann is None:
                 continue
 
-            # Extract necessary data for __getitem__
-            # LINEMOD GT format: [x, y, w, h] -> Convert to xyxy for transforms
+            # Prepare metadata
             x, y, w, h = target_ann["obj_bb"]
             bbox_xyxy = [x, y, x + w, y + h]
-
             rot_list = target_ann["cam_R_m2c"]
 
-            # Store minimal info needed to process this sample later
-            meta_item = {
-                "img_path": img_path,
-                "bbox": bbox_xyxy,
-                "rot_matrix_list": rot_list,  # Store as list, convert to numpy later
-                "obj_id": obj_id,
-            }
-            self.metadata.append(meta_item)
+            # Store the RAW image and metadata in memory
+            self.memory_buffer.append(
+                {
+                    "image": image,  # Huge numpy array
+                    "bbox": bbox_xyxy,  # List
+                    "rot_matrix": rot_list,  # List
+                }
+            )
 
     def __len__(self):
-        return len(self.metadata)
+        return len(self.memory_buffer)
 
     def __getitem__(self, idx):
         """
-        Retrieves a single sample from the dataset.
-        Lazy loading happens here.
+        Retrieves data from RAM and applies dynamic transformations.
         """
-        meta = self.metadata[idx]
+        sample = self.memory_buffer[idx]
 
-        # 1. Load Image
-        # cv2 loads as BGR, convert to RGB
-        image = cv2.imread(meta["img_path"])
+        # 1. Get raw image from memory
+        image_raw = sample["image"]
+        bbox = sample["bbox"]
 
-        # Robustness check: if image is corrupted, just return the next valid index
-        if image is None:
-            new_idx = (idx + 1) % len(self.metadata)
-            return self.__getitem__(new_idx)
+        # 2. Apply Dynamic Transform (Augmentation/Crop/Resize happens here)
+        # Because we stored the raw image, this is calculated fresh every epoch.
+        img_tensor = self.transform(image_raw, bbox)
 
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # 2. Apply Transform & Crop
-        # The transform handles the cropping using the bbox and augments the image
-        img_tensor = self.transform(image, meta["bbox"])
-
-        # 3. Process Rotation (Matrix -> Quaternion)
-        # Convert list back to numpy 3x3
-        rot_matrix = np.array(meta["rot_matrix_list"], dtype=np.float32).reshape(3, 3)
-
+        # 3. Process Rotation
+        rot_matrix = np.array(sample["rot_matrix"], dtype=np.float32).reshape(3, 3)
         r = R.from_matrix(rot_matrix)
-        quat = r.as_quat()  # Scipy returns (x, y, z, w)
+        quat = r.as_quat()  # (x, y, z, w)
 
         # Reorder to (w, x, y, z)
         quat_wxyz = np.array([quat[3], quat[0], quat[1], quat[2]], dtype=np.float32)
 
-        # 4. Enforce Hemisphere Constraint (w >= 0)
-        # This handles the double cover problem by mapping all q to the upper hemisphere
+        # Hemisphere constraint
         if quat_wxyz[0] < 0:
             quat_wxyz *= -1
 
