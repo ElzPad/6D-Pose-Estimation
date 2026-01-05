@@ -34,16 +34,16 @@ class LinemodInferenceDataset(Dataset):
         """
         if obj_id not in self.gt_cache:
             # Construct path: original_root/01/gt.yml
-            gt_path = self.orig_root / f"{obj_id:02d}" / "gt.yml"
+            gt_path = self.orig_root / "data" / f"{obj_id:02d}" / "gt.yml"
             if not gt_path.exists():
                 # Fallback for unpadded names if necessary
-                gt_path = self.orig_root / str(obj_id) / "gt.yml"
+                gt_path = self.orig_root / "data" / str(obj_id) / "gt.yml"
                 
             if gt_path.exists():
                 with open(gt_path, 'r') as f:
                     self.gt_cache[obj_id] = yaml.safe_load(f)
             else:
-                self.gt_cache[obj_id] = None # Mark as missing
+                raise FileNotFoundError(f"Ground truth file not found for object {obj_id:02d}. Expected path: {gt_path}")
         
         # Retrieve data
         gt_data = self.gt_cache[obj_id]
@@ -57,7 +57,7 @@ class LinemodInferenceDataset(Dataset):
                     t = torch.tensor(ann['cam_t_m2c'], dtype=torch.float32).view(3, 1)
                     return R, t
                     
-        return torch.eye(3), torch.zeros(3, 1) # Return identity/zeros if missing
+        raise ValueError(f"Ground truth pose not found for object {obj_id:02d}, frame {frame_id}")
 
     def __len__(self):
         return len(self.file_ids)
