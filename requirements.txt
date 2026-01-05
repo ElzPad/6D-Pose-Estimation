@@ -8,6 +8,7 @@ PyYAML
 scikit-learn
 torch
 torchvision
-ultralytics
+tqdm
 trimesh
+ultralytics
 # open3d
