@@ -11,7 +11,7 @@ import trimesh
 from ultralytics import YOLO
 from geometry.pinhole_camera_model import pinhole_translation
 from geometry.quaternion_to_rotation_matrix import quaternion_to_matrix
-from dataset.linemod_dataset import LinemodInferenceDataset, collate_fn
+from dataset.linemod_inference_dataset import LinemodInferenceDataset, collate_fn
 from torch.utils.data import DataLoader
 from augmentations import get_val_transforms
 from models.yolo.load import load_yolo
