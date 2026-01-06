@@ -43,25 +43,27 @@ class LineModRotationPredictionTransform(object):
             ]
         )
 
+    # In augmentations/transforms.py
     def _crop(self, image, bbox):
-        """
-        Helper to crop the object from the full image with padding.
-        """
         w_img, h_img = image.size
-        x_center, y_center, w_box, h_box = bbox
-
-        xmin, xmax = x_center - w_box/2, x_center + w_box/2
-        ymin, ymax = y_center - h_box/2, y_center + h_box/2
-
+        
+        # Correct unpacking for [x1, y1, x2, y2]
+        x1, y1, x2, y2 = bbox
+        
+        # Calculate actual width/height
+        w_box = x2 - x1
+        h_box = y2 - y1
+        
+        # --- The rest of your logic remains the same, but using correct w_box ---
         pad_x = int(w_box * self.padding_factor)
         pad_y = int(h_box * self.padding_factor)
-
-        x1 = max(0, xmin - pad_x)
-        y1 = max(0, ymin - pad_y)
-        x2 = min(w_img, xmax + pad_x)
-        y2 = min(h_img, ymax + pad_y)
         
-        return image.crop((x1, y1, x2, y2))
+        crop_x1 = max(0, int(x1 - pad_x))
+        crop_y1 = max(0, int(y1 - pad_y))
+        crop_x2 = min(w_img, int(x2 + pad_x))
+        crop_y2 = min(h_img, int(y2 + pad_y))
+        
+        return image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
 
     def _add_noise(self, image):
         """

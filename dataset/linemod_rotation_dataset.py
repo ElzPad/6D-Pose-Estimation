@@ -1,6 +1,7 @@
 import os
 import yaml
 import cv2
+import random
 import torch
 import numpy as np
 from torch.utils.data import Dataset
@@ -77,13 +78,19 @@ class LineModRotationDataset(Dataset):
             gt_data = yaml.safe_load(f)
 
         all_indices = sorted([int(k) for k in gt_data.keys()])
+
+        ##############
+        random.seed(42)
+        random.shuffle(all_indices)
+
         split_cutoff = int(len(all_indices) * self.split_percentage)
 
         if self.split == "train":
             target_indices = all_indices[:split_cutoff]
         else:
             target_indices = all_indices[split_cutoff:]
-
+        ##############
+        
         # Iterate and load
         for frame_id in tqdm(target_indices, desc=f"Loading Obj {obj_id}", leave=False):
             img_name = f"{frame_id:04d}.png"
