@@ -123,14 +123,15 @@ class LineModRotationDataset(Dataset):
 
             # Prepare metadata
             x, y, w, h = target_ann["obj_bb"]
-            bbox_xyxy = [x, y, x + w, y + h]
+            x_center, y_center = x + w/2, y + h/2
+            bbox_center = [x_center, y_center, w, h]
             rot_list = target_ann["cam_R_m2c"]
 
             # Store the RAW image and metadata in memory
             self.memory_buffer.append(
                 {
                     "image": image,  # Huge numpy array
-                    "bbox": bbox_xyxy,  # List
+                    "bbox": bbox_center,  # List
                     "rot_matrix": rot_list,  # List
                 }
             )

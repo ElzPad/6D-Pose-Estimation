@@ -47,12 +47,10 @@ class LineModRotationPredictionTransform(object):
     def _crop(self, image, bbox):
         w_img, h_img = image.size
         
-        # Correct unpacking for [x1, y1, x2, y2]
-        x1, y1, x2, y2 = bbox
-        
-        # Calculate actual width/height
-        w_box = x2 - x1
-        h_box = y2 - y1
+        # Correct unpacking for [x_center, y_center, w_box, h_box]
+        x_center, y_center, w_box, h_box = bbox
+        x1, y1 = x_center - w_box/2, y_center - h_box/2
+        x2, y2 = x_center + w_box/2, y_center + h_box/2
         
         # --- The rest of your logic remains the same, but using correct w_box ---
         pad_x = int(w_box * self.padding_factor)
