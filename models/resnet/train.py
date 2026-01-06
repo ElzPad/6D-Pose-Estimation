@@ -166,6 +166,10 @@ def main():
     # Only optimize trainable params (important if freezing)
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.wd)
+    
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3
+    )
 
     save_dir = Path(args.save_dir) / args.run_name / f"obj_{args.object_id:02d}"
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -178,7 +182,10 @@ def main():
         tr_loss, tr_ang = train_one_epoch(model, train_loader, optimizer, device)
         va_loss, va_ang = eval_one_epoch(model, val_loader, device)
 
-        print(f"[{epoch:03d}/{args.epochs}] "
+        scheduler.step(va_ang)
+        current_lr = optimizer.param_groups[0]['lr']
+
+        print(f"[{epoch:03d}/{args.epochs}] lr={current_lr:.1e} | "
               f"train loss={tr_loss:.4f} ang={tr_ang:.2f}° | "
               f"val loss={va_loss:.4f} ang={va_ang:.2f}°")
 
