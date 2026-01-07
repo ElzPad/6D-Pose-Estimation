@@ -23,12 +23,13 @@ class LineModRotationPredictionTransform(object):
         self.is_train = is_train
 
         # We use photometric transforms that do NOT change the 3D orientation.
+        # REDUCED strength to preserve edge/texture details crucial for rotation estimation
         if self.is_train:
             self.color_jitter = transforms.ColorJitter(
-                brightness=0.25,  # Randomly adjust brightness
-                contrast=0.25,  # Randomly adjust contrast
-                saturation=0.25,  # Randomly adjust saturation
-                hue=0.05,  # Slight hue shift
+                brightness=0.1,  # Reduced from 0.25 - preserve shading gradients
+                contrast=0.1,  # Reduced from 0.25 - preserve edge visibility
+                saturation=0.15,  # Slightly reduced
+                hue=0.03,  # Reduced from 0.05
             )
 
         # 2. Resizing and Normalization (Common to both)
@@ -66,10 +67,11 @@ class LineModRotationPredictionTransform(object):
     def _add_noise(self, image):
         """
         Adds random Gaussian noise to the PIL image.
+        Reduced sigma to preserve fine texture details.
         """
         img_arr = np.array(image)
 
-        sigma = np.random.uniform(0, 10.0)
+        sigma = np.random.uniform(0, 5.0)  # Reduced from 10.0
         noise = np.random.normal(0, sigma, img_arr.shape)
         noisy_img = np.clip(img_arr + noise, 0, 255).astype(np.uint8)
         return Image.fromarray(noisy_img)
@@ -89,19 +91,20 @@ class LineModRotationPredictionTransform(object):
         crop = self._crop(image, bbox)
 
         # augment (Train only)
+        # REDUCED augmentation to preserve orientation cues (edges, textures)
         if self.is_train:
-            # color Jitter (80% chance)
-            if random.random() < 0.8:
+            # Color Jitter (60% chance) - helps with lighting robustness
+            if random.random() < 0.6:
                 crop = self.color_jitter(crop)
 
-            # Gaussian Blur (50% chance) - Simulates out-of-focus camera
-            if random.random() < 0.5:
-                # Random radius between 0 and 2.0
-                radius = random.uniform(0.1, 2.0)
+            # Gaussian Blur (30% chance) - mild blur for regularization
+            # Max radius 0.8 (reduced from 2.0) to preserve edge details
+            if random.random() < 0.3:
+                radius = random.uniform(0.1, 0.8)
                 crop = crop.filter(ImageFilter.GaussianBlur(radius=radius))
 
-            # Gaussian Noise (30% chance) - Simulates sensor noise
-            if random.random() < 0.3:
+            # Gaussian Noise (20% chance, reduced from 30%)
+            if random.random() < 0.2:
                 crop = self._add_noise(crop)
 
         # Normalize & Resize

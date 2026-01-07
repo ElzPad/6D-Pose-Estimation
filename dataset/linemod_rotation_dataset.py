@@ -79,7 +79,6 @@ class LineModRotationDataset(Dataset):
 
         all_indices = sorted([int(k) for k in gt_data.keys()])
 
-        ##############
         random.seed(42)
         random.shuffle(all_indices)
 
@@ -89,7 +88,6 @@ class LineModRotationDataset(Dataset):
             target_indices = all_indices[:split_cutoff]
         else:
             target_indices = all_indices[split_cutoff:]
-        ##############
         
         # Iterate and load
         for frame_id in tqdm(target_indices, desc=f"Loading Obj {obj_id}", leave=False):
