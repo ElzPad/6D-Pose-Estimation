@@ -131,6 +131,7 @@ class LineModRotationDataset(Dataset):
                     "image": image,  # Huge numpy array
                     "bbox": bbox_center,  # List
                     "rot_matrix": rot_list,  # List
+                    "object_id": obj_id,  # Object identity for conditioning
                 }
             )
 
@@ -140,12 +141,14 @@ class LineModRotationDataset(Dataset):
     def __getitem__(self, idx):
         """
         Retrieves data from RAM and applies dynamic transformations.
+        Returns: (img_tensor, quat_tensor, object_id)
         """
         sample = self.memory_buffer[idx]
 
         # 1. Get raw image from memory
         image_raw = sample["image"]
         bbox = sample["bbox"]
+        object_id = sample["object_id"]
 
         # 2. Apply Dynamic Transform (Augmentation/Crop/Resize happens here)
         # Because we stored the raw image, this is calculated fresh every epoch.
@@ -165,4 +168,4 @@ class LineModRotationDataset(Dataset):
 
         quat_tensor = torch.from_numpy(quat_wxyz)
 
-        return img_tensor, quat_tensor
+        return img_tensor, quat_tensor, object_id

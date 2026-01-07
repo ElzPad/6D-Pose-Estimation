@@ -27,9 +27,19 @@ def parse_args():
     p.add_argument("--run_name", type=str, default="resnet50_rot")
     p.add_argument("--freeze_backbone", action="store_true",
                    help="If set, freeze all ResNet layers except the final FC head.")
+    p.add_argument("--use_object_id", action="store_true",
+                   help="If set, use object identity conditioning (one-hot) for multi-object training.")
     p.add_argument("--device", type=str, default="cuda")
     return p.parse_args()
 
+
+# LINEMOD object IDs (13 objects total)
+# These are the valid IDs in the dataset: 1,2,4,5,6,8,9,10,11,12,13,14,15
+LINEMOD_OBJECT_IDS = [1, 2, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15]
+NUM_OBJECTS = len(LINEMOD_OBJECT_IDS)
+
+# Create mapping from object_id to one-hot index
+OBJECT_ID_TO_INDEX = {obj_id: idx for idx, obj_id in enumerate(LINEMOD_OBJECT_IDS)}
 
 class ResNetRotation(nn.Module):
     """
@@ -48,9 +58,75 @@ class ResNetRotation(nn.Module):
                 if not name.startswith("fc."):
                     p.requires_grad = False
 
-    def forward(self, x):
+    def forward(self, x, object_ids=None):
         q = self.backbone(x)                    # (B,4)
         q = F.normalize(q, p=2, dim=1)          # unit quaternion
+        return q
+
+
+class ResNetRotationWithObjectID(nn.Module):
+    """
+    ResNet-50 backbone (ImageNet) + object identity conditioning + quaternion head.
+    
+    The model concatenates a one-hot encoded object ID to the visual features
+    before the final FC layer. This allows the model to learn object-specific
+    rotation patterns when training on multiple objects simultaneously.
+    
+    Architecture:
+        Image -> ResNet50 (up to avgpool) -> 2048-dim features
+        Object ID -> One-hot encoding -> 13-dim
+        Concatenate -> 2061-dim -> FC -> 4-dim quaternion
+    """
+    def __init__(self, num_objects: int = NUM_OBJECTS, freeze_backbone: bool = False):
+        super().__init__()
+        self.num_objects = num_objects
+        
+        # Load pretrained ResNet50
+        self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        self.feature_dim = self.backbone.fc.in_features  # 2048 for ResNet50
+        
+        # Remove the original FC layer - we'll extract features manually
+        self.backbone.fc = nn.Identity()
+        
+        # New head: features (2048) + one-hot object ID (13) -> quaternion (4)
+        self.head = nn.Sequential(
+            nn.Linear(self.feature_dim + num_objects, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(512, 4)
+        )
+        
+        if freeze_backbone:
+            for name, p in self.backbone.named_parameters():
+                p.requires_grad = False
+
+    def forward(self, x, object_ids):
+        """
+        Args:
+            x: (B, 3, 224, 224) input images
+            object_ids: (B,) tensor of object IDs (actual LINEMOD IDs like 1,2,4,5,...)
+        
+        Returns:
+            (B, 4) normalized quaternions
+        """
+        # Extract visual features
+        features = self.backbone(x)  # (B, 2048)
+        
+        # Convert object IDs to one-hot encoding
+        # First map actual IDs to indices (0-12)
+        device = x.device
+        
+        indices = torch.tensor([OBJECT_ID_TO_INDEX[int(oid)] for oid in object_ids], 
+                               device=device)
+        one_hot = F.one_hot(indices, num_classes=self.num_objects).float()  # (B, 13)
+        
+        # Concatenate features and object identity
+        combined = torch.cat([features, one_hot], dim=1)  # (B, 2061)
+        
+        # Predict quaternion
+        q = self.head(combined)  # (B, 4)
+        q = F.normalize(q, p=2, dim=1)  # unit quaternion
+        
         return q
 
 def quat_geodesic_loss(q_pred, q_gt):
@@ -102,18 +178,24 @@ def quat_angle_error_deg(q_pred, q_gt):
     return (ang * 180.0 / torch.pi).mean().item()
 
 
-def train_one_epoch(model, loader, optimizer, device):
+def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
     model.train()
     total_loss = 0.0
     total_ang = 0.0
     n = 0
 
-    for imgs, q_gt in loader:
+    for batch in loader:
+        if use_object_id:
+            imgs, q_gt, object_ids = batch
+        else:
+            imgs, q_gt, _ = batch  # Ignore object_id
+            object_ids = None
+            
         imgs = imgs.to(device, non_blocking=True).float()
         q_gt = q_gt.to(device, non_blocking=True).float()
 
         optimizer.zero_grad(set_to_none=True)
-        q_pred = model(imgs)
+        q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
         loss = quat_geodesic_loss(q_pred, q_gt)
         loss.backward()
         optimizer.step()
@@ -127,17 +209,23 @@ def train_one_epoch(model, loader, optimizer, device):
 
 
 @torch.no_grad()
-def eval_one_epoch(model, loader, device):
+def eval_one_epoch(model, loader, device, use_object_id=False):
     model.eval()
     total_loss = 0.0
     total_ang = 0.0
     n = 0
 
-    for imgs, q_gt in loader:
+    for batch in loader:
+        if use_object_id:
+            imgs, q_gt, object_ids = batch
+        else:
+            imgs, q_gt, _ = batch  # Ignore object_id
+            object_ids = None
+            
         imgs = imgs.to(device, non_blocking=True).float()
         q_gt = q_gt.to(device, non_blocking=True).float()
 
-        q_pred = model(imgs)
+        q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
         loss = quat_geodesic_loss(q_pred, q_gt)
 
         bs = imgs.size(0)
@@ -183,7 +271,17 @@ def main():
         drop_last=False
     )
 
-    model = ResNetRotation(freeze_backbone=args.freeze_backbone).to(device)
+    # Choose model based on --use_object_id flag
+    use_object_id = args.use_object_id
+    if use_object_id:
+        print("Using ResNetRotationWithObjectID (object identity conditioning enabled)")
+        model = ResNetRotationWithObjectID(
+            num_objects=NUM_OBJECTS,
+            freeze_backbone=args.freeze_backbone
+        ).to(device)
+    else:
+        print("Using ResNetRotation (single object or no conditioning)")
+        model = ResNetRotation(freeze_backbone=args.freeze_backbone).to(device)
 
     # Only optimize trainable params (important if freezing)
     params = [p for p in model.parameters() if p.requires_grad]
@@ -201,8 +299,8 @@ def main():
     best_val_ang = float("inf")
 
     for epoch in range(1, args.epochs + 1):
-        tr_loss, tr_ang = train_one_epoch(model, train_loader, optimizer, device)
-        va_loss, va_ang = eval_one_epoch(model, val_loader, device)
+        tr_loss, tr_ang = train_one_epoch(model, train_loader, optimizer, device, use_object_id)
+        va_loss, va_ang = eval_one_epoch(model, val_loader, device, use_object_id)
 
         scheduler.step(va_ang)
         current_lr = optimizer.param_groups[0]['lr']
@@ -217,6 +315,7 @@ def main():
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "object_id": args.object_id,
+            "use_object_id": use_object_id,
             "args": vars(args),
         }, last_path)
 
@@ -229,6 +328,7 @@ def main():
                 "optimizer_state": optimizer.state_dict(),
                 "best_val_ang_deg": best_val_ang,
                 "object_id": args.object_id,
+                "use_object_id": use_object_id,
                 "args": vars(args),
             }, best_path)
             print(f"  ✓ New best saved: {best_path} (val ang {best_val_ang:.2f}°)")
