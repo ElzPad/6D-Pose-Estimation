@@ -17,7 +17,7 @@ def parse_args():
                    help="Path to LINEMOD preprocessed root (contains data/01, data/02 ... OR object folders).")
     p.add_argument("--object_id", type=int, default=0, help="LINEMOD object id (e.g., 0=all, 1=ape, 5=can, etc.)")
     p.add_argument("--epochs", type=int, default=30)
-    p.add_argument("--batch", type=int, default=16)
+    p.add_argument("--batch", type=int, default=64)
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--wd", type=float, default=1e-4)
     p.add_argument("--split_percentage", type=float, default=0.8,
