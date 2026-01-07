@@ -53,16 +53,38 @@ class ResNetRotation(nn.Module):
         q = F.normalize(q, p=2, dim=1)          # unit quaternion
         return q
 
-def quat_l2_sign_invariant(q_pred, q_gt):
+def quat_geodesic_loss(q_pred, q_gt):
     """
-    Sign-invariant quaternion loss: q and -q represent the same rotation.
-    q_pred, q_gt: (B,4), already normalized (or close).
+    Geodesic quaternion loss - true angular distance on SO(3).
+    
+    This loss computes the actual rotation angle between predicted and ground truth
+    quaternions, providing gradients that are aligned with rotation improvement.
+    
+    The absolute value of the dot product handles the sign ambiguity naturally
+    (q and -q represent the same rotation).
+    
+    Args:
+        q_pred: (B, 4) predicted quaternions [w, x, y, z], should be normalized
+        q_gt: (B, 4) ground truth quaternions [w, x, y, z], should be normalized
+    
+    Returns:
+        Mean angular distance in radians
     """
-    # both are (B,4)
-    loss1 = (q_pred - q_gt).pow(2).sum(dim=1)
-    loss2 = (q_pred + q_gt).pow(2).sum(dim=1)
-    return torch.min(loss1, loss2).mean()
-
+    # Ensure normalization for numerical stability
+    q_pred = F.normalize(q_pred, p=2, dim=1)
+    q_gt = F.normalize(q_gt, p=2, dim=1)
+    
+    # Dot product: cos(angle/2) for unit quaternions
+    # Absolute value handles sign ambiguity (q ≡ -q)
+    dot = torch.abs((q_pred * q_gt).sum(dim=1))
+    
+    # Clamp to avoid numerical issues with acos at boundaries
+    dot = dot.clamp(0, 1 - 1e-7)
+    
+    # Angular distance: angle = 2 * arccos(|dot|)
+    angle = 2 * torch.acos(dot)
+    
+    return angle.mean()
 
 @torch.no_grad()
 def quat_angle_error_deg(q_pred, q_gt):
@@ -92,7 +114,7 @@ def train_one_epoch(model, loader, optimizer, device):
 
         optimizer.zero_grad(set_to_none=True)
         q_pred = model(imgs)
-        loss = quat_l2_sign_invariant(q_pred, q_gt)
+        loss = quat_geodesic_loss(q_pred, q_gt)
         loss.backward()
         optimizer.step()
 
@@ -116,7 +138,7 @@ def eval_one_epoch(model, loader, device):
         q_gt = q_gt.to(device, non_blocking=True).float()
 
         q_pred = model(imgs)
-        loss = quat_l2_sign_invariant(q_pred, q_gt)
+        loss = quat_geodesic_loss(q_pred, q_gt)
 
         bs = imgs.size(0)
         total_loss += loss.item() * bs
