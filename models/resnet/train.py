@@ -29,6 +29,8 @@ def parse_args():
                    help="If set, freeze all ResNet layers except the final FC head.")
     p.add_argument("--use_object_id", action="store_true",
                    help="If set, use object identity conditioning (one-hot) for multi-object training.")
+    p.add_argument("--resume", type=str, default=None,
+                   help="Path to checkpoint to resume training from. Loads model weights only (not optimizer).")
     p.add_argument("--device", type=str, default="cuda")
     return p.parse_args()
 
@@ -283,6 +285,25 @@ def main():
         print("Using ResNetRotation (single object or no conditioning)")
         model = ResNetRotation(freeze_backbone=args.freeze_backbone).to(device)
 
+    # Resume from checkpoint if specified
+    if args.resume:
+        print(f"Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        
+        if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
+            state_dict = checkpoint['model_state']
+            resumed_epoch = checkpoint.get('epoch', 0)
+            resumed_ang = checkpoint.get('best_val_ang_deg', None)
+            print(f"  Loaded weights from epoch {resumed_epoch}" + 
+                  (f" (best val ang: {resumed_ang:.2f}°)" if resumed_ang else ""))
+        else:
+            state_dict = checkpoint
+            print("  Loaded raw state dict")
+        
+        # Load weights (strict=False to handle potential architecture differences)
+        model.load_state_dict(state_dict, strict=False)
+        print(f"  Backbone frozen: {args.freeze_backbone}")
+
     # Only optimize trainable params (important if freezing)
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.wd)
@@ -332,6 +353,20 @@ def main():
                 "args": vars(args),
             }, best_path)
             print(f"  ✓ New best saved: {best_path} (val ang {best_val_ang:.2f}°)")
+
+        # Save every 10 epochs
+        if epoch % 10 == 0:
+            epoch_path = save_dir / f"epoch_{epoch:02d}.pth"
+            torch.save({
+                "epoch": epoch,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "val_ang_deg": va_ang,
+                "object_id": args.object_id,
+                "use_object_id": use_object_id,
+                "args": vars(args),
+            }, epoch_path)
+            print(f"  ✓ Checkpoint saved: {epoch_path}")
 
     print("Done.")
 
