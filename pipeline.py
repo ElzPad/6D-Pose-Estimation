@@ -112,6 +112,11 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
     metrics = {"add": [], "add_s": []}
     pass_count = 0
     total_count = 0
+    
+    # Check if ResNet uses object conditioning
+    use_object_id = getattr(resnet_model, 'use_object_id', False)
+    if use_object_id:
+        print("ResNet using object identity conditioning")
 
     yolo_model.eval()
     resnet_model.eval()
@@ -163,7 +168,13 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
                 # 4. Rotation
                 patch = transformer(img_np, bbox).to(device)
                 with torch.no_grad():
-                    q_pred = resnet_model(patch.unsqueeze(0))
+                    if use_object_id:
+                        # Pass object ID for conditioned model
+                        object_ids = torch.tensor([linemod_id], device=device)
+                        q_pred = resnet_model(patch.unsqueeze(0), object_ids)
+                    else:
+                        # Standard model without conditioning
+                        q_pred = resnet_model(patch.unsqueeze(0), None)
 
                 q_pred = q_pred / torch.norm(q_pred)
                 R_pred = quaternion_to_matrix(q_pred).squeeze(0) # Ensure (3,3)
@@ -185,12 +196,24 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
                     pass_count += 1
                 total_count += 1
 
+                # Compute separate translation and rotation errors
+                t_error = torch.norm(t_pred_tensor - gt_t).item()  # Euclidean distance (mm)
+                
+                # Rotation error: angular distance between R_pred and gt_R
+                R_diff = R_pred @ gt_R.T
+                trace = torch.clamp(R_diff.trace(), -1.0, 3.0)
+                r_error = torch.acos((trace - 1) / 2).item() * 180 / np.pi  # degrees
+
                 results.append({
                     "file": filename,
                     "obj_id": linemod_id,
                     "R": R_pred.cpu().numpy().tolist(),
                     "t": t_pred_np.flatten().tolist(), 
-                    "error": err
+                    "error": err,
+                    "t_error": t_error,
+                    "r_error": r_error,
+                    "gt_R": gt_R.cpu().numpy().tolist(),
+                    "gt_t": gt_t.cpu().numpy().flatten().tolist()
                 })
 
     if total_count > 0:
