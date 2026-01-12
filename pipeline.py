@@ -30,8 +30,7 @@ SYMMETRIC_IDS = [10, 11]
 def get_args():
     parser = argparse.ArgumentParser(description="6D Pose Estimation Inference Pipeline")
 
-    parser.add_argument("--yolo_dataset_root", type=str, default="data/linemod_yolo")
-    parser.add_argument("--linemod_orig_root", type=str, default="data/linemod/Linemod_preprocessed")
+    parser.add_argument("--dataset_root", type=str, default="data/linemod_yolo")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
     parser.add_argument("--models_info", type=str, default="data/linemod_yolo/models/models_info.yml")
     parser.add_argument("--models_dir", type=str, default="data/linemod/Linemod_preprocessed/models", 
@@ -141,8 +140,8 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
             gt_t = target['gt_t'].to(device)
 
             img_tensor = batch_images[i]
+            # Keep as RGB - the transformer expects RGB (same as training)
             img_np = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-            img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
 
             for det in detections:
                 x_c, y_c, w, h, cls_id = det
@@ -234,8 +233,7 @@ def main():
     meshes = load_meshes(args.models_dir)
 
     dataset = LinemodInferenceDataset(
-        yolo_root=args.yolo_dataset_root,
-        linemod_orig_root=args.linemod_orig_root,
+        yolo_root=args.dataset_root,
         split=args.split,
         img_ext=".png"
     )
