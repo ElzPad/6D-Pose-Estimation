@@ -178,6 +178,7 @@ docs/
 
 # Ultralytics runs' reports
 runs/
+runs_*/
 
 # PyPI configuration file
 .pypirc
