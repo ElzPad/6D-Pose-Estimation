@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -13,7 +14,7 @@ from dataset.linemod_rotation_dataset import LineModRotationDataset
 
 def parse_args():
     p = argparse.ArgumentParser("Fine-tune ResNet50 for LINEMOD rotation (quaternion)")
-    p.add_argument("--dataset_path", type=str, default="data/linemod/Linemod_preprocessed/data",
+    p.add_argument("--dataset_path", type=str, default="data/linemod_yolo",
                    help="Path to LINEMOD preprocessed root (contains data/01, data/02 ... OR object folders).")
     p.add_argument("--object_id", type=int, default=0, help="LINEMOD object id (e.g., 0=all, 1=ape, 5=can, etc.)")
     p.add_argument("--epochs", type=int, default=30)
@@ -27,6 +28,8 @@ def parse_args():
     p.add_argument("--run_name", type=str, default="resnet50_rot")
     p.add_argument("--freeze_backbone", action="store_true",
                    help="If set, freeze all ResNet layers except the final FC head.")
+    p.add_argument("--unfreeze_epoch", type=int, default=30,
+                   help="Epoch at which to unfreeze backbone (only used if freeze_backbone is set).")
     p.add_argument("--use_object_id", action="store_true",
                    help="If set, use object identity conditioning (one-hot) for multi-object training.")
     p.add_argument("--resume", type=str, default=None,
@@ -65,6 +68,12 @@ class ResNetRotation(nn.Module):
         q = F.normalize(q, p=2, dim=1)          # unit quaternion
         return q
 
+    def unfreeze_backbone(self):
+        """Unfreeze all backbone parameters for fine-tuning."""
+        for p in self.backbone.parameters():
+            p.requires_grad = True
+        print("[INFO] Backbone unfrozen - all parameters now trainable")
+
 
 class ResNetRotationWithObjectID(nn.Module):
     """
@@ -101,6 +110,12 @@ class ResNetRotationWithObjectID(nn.Module):
         if freeze_backbone:
             for name, p in self.backbone.named_parameters():
                 p.requires_grad = False
+
+    def unfreeze_backbone(self):
+        """Unfreeze all backbone parameters for fine-tuning."""
+        for p in self.backbone.parameters():
+            p.requires_grad = True
+        print("[INFO] Backbone unfrozen - all parameters now trainable")
 
     def forward(self, x, object_ids):
         """
@@ -186,7 +201,8 @@ def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
     total_ang = 0.0
     n = 0
 
-    for batch in loader:
+    pbar = tqdm(loader, desc="Training", leave=False)
+    for batch in pbar:
         if use_object_id:
             imgs, q_gt, object_ids = batch
         else:
@@ -206,6 +222,8 @@ def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
         total_loss += loss.item() * bs
         total_ang += quat_angle_error_deg(q_pred, q_gt) * bs
         n += bs
+        
+        pbar.set_postfix(loss=f"{loss.item():.4f}", ang=f"{quat_angle_error_deg(q_pred, q_gt):.2f}°")
 
     return total_loss / max(n, 1), total_ang / max(n, 1)
 
@@ -217,7 +235,8 @@ def eval_one_epoch(model, loader, device, use_object_id=False):
     total_ang = 0.0
     n = 0
 
-    for batch in loader:
+    pbar = tqdm(loader, desc="Validation", leave=False)
+    for batch in pbar:
         if use_object_id:
             imgs, q_gt, object_ids = batch
         else:
@@ -252,7 +271,7 @@ def main():
     val_ds = LineModRotationDataset(
         root_dir=args.dataset_path,
         object_id=args.object_id if args.object_id!=0 else None,
-        split="test",
+        split="val",
         split_percentage=args.split_percentage
     )
 
@@ -318,8 +337,21 @@ def main():
     last_path = save_dir / "last_resnet50_quat.pth"
 
     best_val_ang = float("inf")
+    backbone_unfrozen = not args.freeze_backbone  # Track if backbone is already unfrozen
 
     for epoch in range(1, args.epochs + 1):
+        # Unfreeze backbone at specified epoch
+        if args.freeze_backbone and not backbone_unfrozen and epoch > args.unfreeze_epoch:
+            model.unfreeze_backbone()
+            backbone_unfrozen = True
+            # Recreate optimizer with all parameters and lower learning rate
+            params = [p for p in model.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(params, lr=args.lr * 0.1, weight_decay=args.wd)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=3
+            )
+            print(f"[Epoch {epoch}] Optimizer recreated with lr={args.lr * 0.1:.1e} for fine-tuning")
+
         tr_loss, tr_ang = train_one_epoch(model, train_loader, optimizer, device, use_object_id)
         va_loss, va_ang = eval_one_epoch(model, val_loader, device, use_object_id)
 
@@ -352,7 +384,7 @@ def main():
                 "use_object_id": use_object_id,
                 "args": vars(args),
             }, best_path)
-            print(f"  ✓ New best saved: {best_path} (val ang {best_val_ang:.2f}°)")
+            print(f"  [OK] New best saved: {best_path} (val ang {best_val_ang:.2f} deg)")
 
         # Save every 10 epochs
         if epoch % 10 == 0:
@@ -366,7 +398,7 @@ def main():
                 "use_object_id": use_object_id,
                 "args": vars(args),
             }, epoch_path)
-            print(f"  ✓ Checkpoint saved: {epoch_path}")
+            print(f"  [OK] Checkpoint saved: {epoch_path}")
 
     print("Done.")
 
