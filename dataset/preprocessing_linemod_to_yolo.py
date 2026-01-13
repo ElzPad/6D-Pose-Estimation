@@ -189,30 +189,29 @@ def process_dataset(dataset_root, output_dir, training_ratio=0.8, seed=42, clean
             for obj in objects:
                 original_id = obj['obj_id']
             
-                # If the object of interest is in our list
-                if original_id in CLASS_MAPPING:
+                # ONLY process the target object for this folder
+                # (e.g., folder "02" should only contain data for obj_id 2)
+                # This ensures bbox and pose labels are always aligned
+                if original_id == target_object_id and original_id in CLASS_MAPPING:
                     class_id = CLASS_MAPPING[original_id]
                     bbox = obj['obj_bb']
                     
-                    # Convert
+                    # Convert bbox to YOLO format
                     yolo_bbox = convert_bbox_to_yolo((img_w, img_h), bbox)
                     
                     # Formatted string --> class_id x_center y_center width height
                     label_str = f"{class_id} {yolo_bbox[0]:.6f} {yolo_bbox[1]:.6f} {yolo_bbox[2]:.6f} {yolo_bbox[3]:.6f}"
                     yolo_labels.append(label_str)
                     
-                    # Pose ground truth: ONLY save pose for the target object of this folder
-                    # (e.g., folder "02" should only contain pose for obj_id 2)
-                    if original_id == target_object_id:
-                        # Pose ground truth: class_id R11 R12 R13 R21 R22 R23 R31 R32 R33 t1 t2 t3
-                        # cam_R_m2c is a 3x3 rotation matrix stored as a flat list (row-major)
-                        # cam_t_m2c is a 3D translation vector
-                        rot_matrix = obj['cam_R_m2c']
-                        translation = obj['cam_t_m2c']
-                        pose_str = f"{class_id} " + " ".join(f"{r:.8f}" for r in rot_matrix) + " " + " ".join(f"{t:.8f}" for t in translation)
-                        pose_labels.append(pose_str)
-                        
-                        has_valid_object = True
+                    # Pose ground truth: class_id R11 R12 R13 R21 R22 R23 R31 R32 R33 t1 t2 t3
+                    # cam_R_m2c is a 3x3 rotation matrix stored as a flat list (row-major)
+                    # cam_t_m2c is a 3D translation vector
+                    rot_matrix = obj['cam_R_m2c']
+                    translation = obj['cam_t_m2c']
+                    pose_str = f"{class_id} " + " ".join(f"{r:.8f}" for r in rot_matrix) + " " + " ".join(f"{t:.8f}" for t in translation)
+                    pose_labels.append(pose_str)
+                    
+                    has_valid_object = True
             
             # Camera instrinsics --> 
             # 0. fx
