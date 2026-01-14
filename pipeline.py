@@ -147,36 +147,30 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
                 x_c, y_c, w, h, cls_id = det
                 bbox = (x_c, y_c, w, h)
                 linemod_id = YOLO_TO_LINEMOD_ID.get(int(cls_id))
-                
                 if linemod_id is None or linemod_id != gt_id:
                     continue
 
-                # 3. Translation
-                obj_diameter = diameters.get(linemod_id, 0.1)
-                f_x, f_y = K[0, 0], K[1, 1]
-                c_x, c_y = K[0, 2], K[1, 2]
-            
-                # [FIXED] Unpack the tuple result from pinhole_translation
-                # assuming first element is the translation vector 't'
-                pinhole_res = pinhole_translation(bbox, f_x, f_y, c_x, c_y, obj_diameter)
-                t_pred_np = np.asarray(pinhole_res)
-
-                # Convert to Tensor for metrics!
-                t_pred_tensor = torch.from_numpy(t_pred_np).float().to(device).view(3, 1)
-
-                # 4. Rotation
+                # 3. Rotation & Depth Scale
                 patch = transformer(img_np, bbox).to(device)
                 with torch.no_grad():
                     if use_object_id:
-                        # Pass object ID for conditioned model
                         object_ids = torch.tensor([linemod_id], device=device)
-                        q_pred = resnet_model(patch.unsqueeze(0), object_ids)
+                        q_pred, depth_scale = resnet_model(patch.unsqueeze(0), object_ids)
                     else:
-                        # Standard model without conditioning
-                        q_pred = resnet_model(patch.unsqueeze(0), None)
-
+                        q_pred, depth_scale = resnet_model(patch.unsqueeze(0), None)
+                q_pred = q_pred[0] if q_pred.ndim == 2 else q_pred
+                depth_scale = depth_scale[0].item() if hasattr(depth_scale, 'shape') else float(depth_scale)
                 q_pred = q_pred / torch.norm(q_pred)
-                R_pred = quaternion_to_matrix(q_pred).squeeze(0) # Ensure (3,3)
+                R_pred = quaternion_to_matrix(q_pred).squeeze(0)
+
+                # 4. Translation (pinhole + depth scale)
+                obj_diameter = diameters.get(linemod_id, 0.1)
+                f_x, f_y = K[0, 0], K[1, 1]
+                c_x, c_y = K[0, 2], K[1, 2]
+                pinhole_X, pinhole_Y, pinhole_Z = pinhole_translation(bbox, f_x, f_y, c_x, c_y, obj_diameter, depth_scale)
+
+                t_pred_np = np.array([pinhole_X, pinhole_Y, pinhole_Z])
+                t_pred_tensor = torch.from_numpy(t_pred_np).float().to(device).view(3, 1)
 
                 # 5. Metrics
                 if linemod_id not in meshes:

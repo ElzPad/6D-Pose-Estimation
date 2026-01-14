@@ -51,22 +51,29 @@ class ResNetRotation(nn.Module):
     ResNet-50 backbone (ImageNet) + quaternion head (4 dims).
     Outputs raw quaternion; we normalize in forward().
     """
+
     def __init__(self, freeze_backbone: bool = False):
         super().__init__()
         self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         in_features = self.backbone.fc.in_features
-        self.backbone.fc = nn.Linear(in_features, 4)
-
+        self.backbone.fc = nn.Identity()
+        self.quat_head = nn.Linear(in_features, 4)
+        self.depth_head = nn.Sequential(
+            nn.Linear(in_features, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 1)
+        )
         if freeze_backbone:
             for name, p in self.backbone.named_parameters():
-                # keep fc trainable
-                if not name.startswith("fc."):
-                    p.requires_grad = False
+                p.requires_grad = False
 
     def forward(self, x, object_ids=None):
-        q = self.backbone(x)                    # (B,4)
-        q = F.normalize(q, p=2, dim=1)          # unit quaternion
-        return q
+        feats = self.backbone(x)  # (B,2048)
+        q = self.quat_head(feats)
+        q = F.normalize(q, p=2, dim=1)
+        depth_scale = self.depth_head(feats).squeeze(1)  # (B,)
+        depth_scale = torch.sigmoid(depth_scale) * 1.5 + 0.25  # Range ~[0.25,1.75]
+        return q, depth_scale
 
     def unfreeze_backbone(self):
         """Unfreeze all backbone parameters for fine-tuning."""
@@ -99,12 +106,17 @@ class ResNetRotationWithObjectID(nn.Module):
         # Remove the original FC layer - we'll extract features manually
         self.backbone.fc = nn.Identity()
         
-        # New head: features (2048) + one-hot object ID (13) -> quaternion (4)
-        self.head = nn.Sequential(
+        # New heads: features (2048) + one-hot (13) -> quaternion (4) and depth (1)
+        self.quat_head = nn.Sequential(
             nn.Linear(self.feature_dim + num_objects, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(512, 4)
+        )
+        self.depth_head = nn.Sequential(
+            nn.Linear(self.feature_dim + num_objects, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 1)
         )
         
         if freeze_backbone:
@@ -122,29 +134,19 @@ class ResNetRotationWithObjectID(nn.Module):
         Args:
             x: (B, 3, 224, 224) input images
             object_ids: (B,) tensor of object IDs (actual LINEMOD IDs like 1,2,4,5,...)
-        
         Returns:
-            (B, 4) normalized quaternions
+            (B, 4) normalized quaternions, (B,) depth scale
         """
-        # Extract visual features
-        features = self.backbone(x)  # (B, 2048)
-        
-        # Convert object IDs to one-hot encoding
-        # First map actual IDs to indices (0-12)
+        features = self.backbone(x)
         device = x.device
-        
-        indices = torch.tensor([OBJECT_ID_TO_INDEX[int(oid)] for oid in object_ids], 
-                               device=device)
-        one_hot = F.one_hot(indices, num_classes=self.num_objects).float()  # (B, 13)
-        
-        # Concatenate features and object identity
-        combined = torch.cat([features, one_hot], dim=1)  # (B, 2061)
-        
-        # Predict quaternion
-        q = self.head(combined)  # (B, 4)
-        q = F.normalize(q, p=2, dim=1)  # unit quaternion
-        
-        return q
+        indices = torch.tensor([OBJECT_ID_TO_INDEX[int(oid)] for oid in object_ids], device=device)
+        one_hot = F.one_hot(indices, num_classes=self.num_objects).float()
+        combined = torch.cat([features, one_hot], dim=1)
+        q = self.quat_head(combined)
+        q = F.normalize(q, p=2, dim=1)
+        depth_scale = self.depth_head(combined).squeeze(1)
+        depth_scale = torch.sigmoid(depth_scale) * 1.5 + 0.25
+        return q, depth_scale
 
 def quat_geodesic_loss(q_pred, q_gt):
     """
@@ -195,66 +197,77 @@ def quat_angle_error_deg(q_pred, q_gt):
     return (ang * 180.0 / torch.pi).mean().item()
 
 
-def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
+
+def train_one_epoch(model, loader, optimizer, device, use_object_id=False, lambda_depth=0.0005):
     model.train()
     total_loss = 0.0
     total_ang = 0.0
+    total_depth_loss = 0.0
     n = 0
 
     pbar = tqdm(loader, desc="Training", leave=False)
     for batch in pbar:
         if use_object_id:
-            imgs, q_gt, object_ids = batch
+            imgs, q_gt, object_ids, depth_scale_gt = batch
         else:
-            imgs, q_gt, _ = batch  # Ignore object_id
+            imgs, q_gt, _, depth_scale_gt = batch
             object_ids = None
-            
+
         imgs = imgs.to(device, non_blocking=True).float()
         q_gt = q_gt.to(device, non_blocking=True).float()
+        depth_scale_gt = depth_scale_gt.to(device, non_blocking=True).float()
 
         optimizer.zero_grad(set_to_none=True)
-        q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
-        loss = quat_geodesic_loss(q_pred, q_gt)
+        q_pred, depth_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
+        loss_rot = quat_geodesic_loss(q_pred, q_gt)
+        loss_depth = torch.nn.functional.l1_loss(depth_pred, depth_scale_gt)
+        loss = loss_rot + lambda_depth * loss_depth
         loss.backward()
         optimizer.step()
 
         bs = imgs.size(0)
         total_loss += loss.item() * bs
         total_ang += quat_angle_error_deg(q_pred, q_gt) * bs
+        total_depth_loss += loss_depth.item() * bs
         n += bs
-        
-        pbar.set_postfix(loss=f"{loss.item():.4f}", ang=f"{quat_angle_error_deg(q_pred, q_gt):.2f}°")
+        pbar.set_postfix(loss=f"{loss.item():.4f}", rot=f"{loss_rot.item():.4f}", depth=f"{loss_depth.item():.4f}", ang=f"{quat_angle_error_deg(q_pred, q_gt):.2f}°")
 
-    return total_loss / max(n, 1), total_ang / max(n, 1)
+    return total_loss / max(n, 1), total_ang / max(n, 1), total_depth_loss / max(n, 1)
+
 
 
 @torch.no_grad()
-def eval_one_epoch(model, loader, device, use_object_id=False):
+def eval_one_epoch(model, loader, device, use_object_id=False, lambda_depth=1.0):
     model.eval()
     total_loss = 0.0
     total_ang = 0.0
+    total_depth_loss = 0.0
     n = 0
 
     pbar = tqdm(loader, desc="Validation", leave=False)
     for batch in pbar:
         if use_object_id:
-            imgs, q_gt, object_ids = batch
+            imgs, q_gt, object_ids, depth_scale_gt = batch
         else:
-            imgs, q_gt, _ = batch  # Ignore object_id
+            imgs, q_gt, _, depth_scale_gt = batch
             object_ids = None
-            
+
         imgs = imgs.to(device, non_blocking=True).float()
         q_gt = q_gt.to(device, non_blocking=True).float()
+        depth_scale_gt = depth_scale_gt.to(device, non_blocking=True).float()
 
-        q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
-        loss = quat_geodesic_loss(q_pred, q_gt)
+        q_pred, depth_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
+        loss_rot = quat_geodesic_loss(q_pred, q_gt)
+        loss_depth = torch.nn.functional.l1_loss(depth_pred, depth_scale_gt)
+        loss = loss_rot + lambda_depth * loss_depth
 
         bs = imgs.size(0)
         total_loss += loss.item() * bs
         total_ang += quat_angle_error_deg(q_pred, q_gt) * bs
+        total_depth_loss += loss_depth.item() * bs
         n += bs
 
-    return total_loss / max(n, 1), total_ang / max(n, 1)
+    return total_loss / max(n, 1), total_ang / max(n, 1), total_depth_loss / max(n, 1)
 
 
 def main():
@@ -339,12 +352,12 @@ def main():
     best_val_ang = float("inf")
     backbone_unfrozen = not args.freeze_backbone  # Track if backbone is already unfrozen
 
+    lambda_depth = 2
     for epoch in range(1, args.epochs + 1):
         # Unfreeze backbone at specified epoch
         if args.freeze_backbone and not backbone_unfrozen and epoch > args.unfreeze_epoch:
             model.unfreeze_backbone()
             backbone_unfrozen = True
-            # Recreate optimizer with all parameters and lower learning rate
             params = [p for p in model.parameters() if p.requires_grad]
             optimizer = torch.optim.AdamW(params, lr=args.lr * 0.1, weight_decay=args.wd)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -352,15 +365,15 @@ def main():
             )
             print(f"[Epoch {epoch}] Optimizer recreated with lr={args.lr * 0.1:.1e} for fine-tuning")
 
-        tr_loss, tr_ang = train_one_epoch(model, train_loader, optimizer, device, use_object_id)
-        va_loss, va_ang = eval_one_epoch(model, val_loader, device, use_object_id)
+        tr_loss, tr_ang, tr_depth = train_one_epoch(model, train_loader, optimizer, device, use_object_id, lambda_depth)
+        va_loss, va_ang, va_depth = eval_one_epoch(model, val_loader, device, use_object_id, lambda_depth)
 
         scheduler.step(va_ang)
         current_lr = optimizer.param_groups[0]['lr']
 
         print(f"[{epoch:03d}/{args.epochs}] lr={current_lr:.1e} | "
-              f"train loss={tr_loss:.4f} ang={tr_ang:.2f}° | "
-              f"val loss={va_loss:.4f} ang={va_ang:.2f}°")
+              f"train loss={tr_loss:.4f} ang={tr_ang:.2f}° depth={tr_depth:.3f} | "
+              f"val loss={va_loss:.4f} ang={va_ang:.2f}° depth={va_depth:.3f}")
 
         # Save last
         torch.save({

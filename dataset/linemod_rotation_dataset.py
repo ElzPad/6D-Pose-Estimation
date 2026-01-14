@@ -1,11 +1,23 @@
+
 import os
 import cv2
+import math
 import torch
 import numpy as np
+import yaml
 from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation as R
 from augmentations.transforms import get_train_transforms, get_val_transforms
 from tqdm import tqdm
+
+# Helper for pinhole Z
+def compute_pinhole_depth(bbox, f_x, diameter):
+    x_center, y_center, w, h = bbox
+    bbox_diag = math.sqrt(w**2 + h**2)
+    if bbox_diag < 1e-6:
+        return 1000.0
+    Z = f_x * diameter / bbox_diag
+    return Z
 
 
 class LineModRotationDataset(Dataset):
@@ -19,12 +31,38 @@ class LineModRotationDataset(Dataset):
     - pose_labels/{split}/ contains pose labels (class_id r00..r22 tx ty tz)
     """
 
-    def __init__(self, root_dir, object_id, split="train", split_percentage=0.8):
+    def __init__(self, root_dir, object_id, split="train", split_percentage=0.8,
+                 intrinsics_path=None, models_info_path=None):
         self.root_dir = root_dir
         self.split = split
-        self.split_percentage = split_percentage  # Not used with YOLO format (split is predefined)
+        self.split_percentage = split_percentage
 
-        # Define transforms (will be applied in __getitem__)
+        # Load camera intrinsics (assume all images use same intrinsics)
+        if intrinsics_path is None:
+            intrinsics_path = os.path.join(root_dir, "camera_intrinsics", split, "0000.yml")
+        if os.path.exists(intrinsics_path):
+            with open(intrinsics_path, "r") as f:
+                K = yaml.safe_load(f)
+            self.f_x = K["fx"]
+            self.f_y = K["fy"]
+            self.c_x = K["cx"]
+            self.c_y = K["cy"]
+        else:
+            self.f_x = self.f_y = 572.4114
+            self.c_x = 325.2611
+            self.c_y = 242.0489
+
+        # Load object diameters
+        if models_info_path is None:
+            models_info_path = os.path.join(root_dir, "models/models_info.yml")
+        if os.path.exists(models_info_path):
+            with open(models_info_path, "r") as f:
+                data = yaml.safe_load(f)
+            self.diameters = {int(k): v['diameter'] for k, v in data.items()}
+        else:
+            raise FileNotFoundError(f"Cannot read models info from {models_info_path}")
+
+        # Define transforms
         if split == "train":
             self.transform = get_train_transforms(image_size=224)
         else:
@@ -136,13 +174,29 @@ class LineModRotationDataset(Dataset):
             # Extract rotation matrix values (indices 1-9)
             rot_list = [float(pose_parts[i]) for i in range(1, 10)]
 
-            # Store the RAW image and metadata in memory
+            # Get GT translation Z from pose label (if available)
+            gt_Z = None
+            if len(pose_parts) >= 13:
+                try:
+                    gt_Z = float(pose_parts[12])
+                except Exception:
+                    gt_Z = None
+            # Get diameter for this object
+            diameter = self.diameters.get(obj_id, 0.2)
+            # Compute pinhole Z
+            pinhole_Z = compute_pinhole_depth(bbox_center, self.f_x, diameter)
+            # Compute scale (avoid div0)
+            if gt_Z is not None and pinhole_Z > 1e-6:
+                depth_scale = gt_Z / pinhole_Z
+            else:
+                depth_scale = 1.0
             self.memory_buffer.append(
                 {
-                    "image": image,  # Huge numpy array
-                    "bbox": bbox_center,  # List [x_center, y_center, w, h] in pixels
-                    "rot_matrix": rot_list,  # List of 9 rotation matrix values
-                    "object_id": obj_id,  # Object identity for conditioning
+                    "image": image,
+                    "bbox": bbox_center,
+                    "rot_matrix": rot_list,
+                    "object_id": obj_id,
+                    "depth_scale": depth_scale,
                 }
             )
 
@@ -152,7 +206,7 @@ class LineModRotationDataset(Dataset):
     def __getitem__(self, idx):
         """
         Retrieves data from RAM and applies dynamic transformations.
-        Returns: (img_tensor, quat_tensor, object_id)
+        Returns: (img_tensor, quat_tensor, object_id, depth_scale)
         """
         sample = self.memory_buffer[idx]
 
@@ -160,6 +214,7 @@ class LineModRotationDataset(Dataset):
         image_raw = sample["image"]
         bbox = sample["bbox"]
         object_id = sample["object_id"]
+        depth_scale = sample["depth_scale"]
 
         # 2. Apply Dynamic Transform (Augmentation/Crop/Resize happens here)
         # Because we stored the raw image, this is calculated fresh every epoch.
@@ -179,4 +234,4 @@ class LineModRotationDataset(Dataset):
 
         quat_tensor = torch.from_numpy(quat_wxyz)
 
-        return img_tensor, quat_tensor, object_id
+        return img_tensor, quat_tensor, object_id, torch.tensor(depth_scale, dtype=torch.float32)
