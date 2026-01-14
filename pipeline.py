@@ -4,7 +4,6 @@ import yaml
 from tqdm import tqdm
 import torch
 import json
-import cv2
 import numpy as np
 import trimesh
 
@@ -25,6 +24,10 @@ YOLO_TO_LINEMOD_ID = {
     7: 10, 8: 11, 9: 12, 10: 13, 11: 14, 12: 15,
 }
 
+LINEMOD_ID_TO_YOLO = {
+    v: k for k, v in YOLO_TO_LINEMOD_ID.items()
+}
+
 SYMMETRIC_IDS = [10, 11]
 
 def get_args():
@@ -38,7 +41,6 @@ def get_args():
 
     parser.add_argument("--yolo_weights", type=str, required=True)
     parser.add_argument("--resnet_weights", type=str, required=True)
-    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_file", type=str, default="results.json")
 
@@ -85,30 +87,9 @@ def save_results(results, output_path):
         json.dump(results, f, indent=2)
     print("Save complete.")
 
-def parse_yolo_result(result):
-    if result.boxes.shape[0] == 0:
-        return []
-    boxes = result.boxes.xywh.cpu().numpy()
-    classes = result.boxes.cls.cpu().numpy()
-    confs = result.boxes.conf.cpu().numpy()
-
-    unique_classes = np.unique(classes)
-    keep_indices = []
-
-    for cls in unique_classes:
-        cls_indices = np.where(classes == cls)[0]
-        best_idx_subset = np.argmax(confs[cls_indices])
-        keep_indices.append(cls_indices[best_idx_subset])
-
-    boxes = boxes[keep_indices]
-    classes = classes[keep_indices]
-    detections = np.column_stack((boxes, classes))
-    return detections.tolist()
-
 def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, device):
     transformer = get_val_transforms(image_size=224)
     results = []
-    metrics = {"add": [], "add_s": []}
     pass_count = 0
     total_count = 0
     
@@ -122,92 +103,92 @@ def run_inference(dataloader, yolo_model, resnet_model, diameters, meshes, devic
     print(f"Running inference on {len(dataloader.dataset)} images...")
 
     for batch_images, batch_targets in tqdm(dataloader):
-        images_tensor = torch.stack(batch_images).to(device)
+        target = batch_targets[0]
+        filename = target['image_id']
+        
+        K = target['intrinsics'].numpy()
+        gt_id = int(target['gt_class_id'])
+        gt_R = target['gt_R'].to(device)
+        gt_t = target['gt_t'].to(device)
 
         # 1. YOLO Stage
-        yolo_results = yolo_model(images_tensor, verbose=False)
+        images_tensor = torch.stack(batch_images).to(device)
+        yolo_result = yolo_model(images_tensor, verbose=False)[0]
 
-        # 2. Instance Processing
-        for i, result in enumerate(yolo_results):
-            detections = parse_yolo_result(result)
-            if not detections: continue
+        detections = yolo_result.boxes.xywh.cpu().numpy()
+        classes = yolo_result.boxes.cls.cpu().numpy()
+        confs = yolo_result.boxes.conf.cpu().numpy()
+        if len(detections) == 0:
+            continue
+        # Take the highest confidence detection for the correct class
+        yolo_class = LINEMOD_ID_TO_YOLO.get(gt_id, None)
+        if yolo_class is None:
+            continue
+        cls_indices = np.where(classes == yolo_class)[0]
+        if len(cls_indices) == 0:
+            continue
+        best_idx = cls_indices[np.argmax(confs[cls_indices])]
+        pred_bbox = detections[best_idx]
 
-            target = batch_targets[i]
-            filename = target['image_id']
-            K = target['intrinsics'].numpy()
-            gt_id = int(target['gt_class_id'])
-            gt_R = target['gt_R'].to(device)
-            gt_t = target['gt_t'].to(device)
+        img_tensor = batch_images[0]
+        # Keep as RGB - the transformer expects RGB (same as training)
+        img_np = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
 
-            img_tensor = batch_images[i]
-            # Keep as RGB - the transformer expects RGB (same as training)
-            img_np = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+        # 2. Rotation & Depth Scale
+        patch = transformer(img_np, pred_bbox).to(device)
+        with torch.no_grad():
+            if use_object_id:
+                object_ids = torch.tensor([gt_id], device=device)
+                q_pred, depth_scale = resnet_model(patch.unsqueeze(0), object_ids)
+            else:
+                q_pred, depth_scale = resnet_model(patch.unsqueeze(0), None)
+        q_pred = q_pred[0] if q_pred.ndim == 2 else q_pred
+        depth_scale = depth_scale[0].item() if hasattr(depth_scale, 'shape') else float(depth_scale)
+        q_pred = q_pred / torch.norm(q_pred)
+        R_pred = quaternion_to_matrix(q_pred).squeeze(0)
 
-            for det in detections:
-                x_c, y_c, w, h, cls_id = det
-                bbox = (x_c, y_c, w, h)
-                linemod_id = YOLO_TO_LINEMOD_ID.get(int(cls_id))
-                if linemod_id is None or linemod_id != gt_id:
-                    continue
+        # 3. Translation (pinhole + depth scale)
+        obj_diameter = diameters.get(gt_id, 0.1)
+        f_x, f_y = K[0, 0], K[1, 1]
+        c_x, c_y = K[0, 2], K[1, 2]
+        pinhole_X, pinhole_Y, pinhole_Z = pinhole_translation(pred_bbox, f_x, f_y, c_x, c_y, obj_diameter, depth_scale)
 
-                # 3. Rotation & Depth Scale
-                patch = transformer(img_np, bbox).to(device)
-                with torch.no_grad():
-                    if use_object_id:
-                        object_ids = torch.tensor([linemod_id], device=device)
-                        q_pred, depth_scale = resnet_model(patch.unsqueeze(0), object_ids)
-                    else:
-                        q_pred, depth_scale = resnet_model(patch.unsqueeze(0), None)
-                q_pred = q_pred[0] if q_pred.ndim == 2 else q_pred
-                depth_scale = depth_scale[0].item() if hasattr(depth_scale, 'shape') else float(depth_scale)
-                q_pred = q_pred / torch.norm(q_pred)
-                R_pred = quaternion_to_matrix(q_pred).squeeze(0)
+        t_pred_np = np.array([pinhole_X, pinhole_Y, pinhole_Z])
+        t_pred_tensor = torch.from_numpy(t_pred_np).float().to(device).view(3, 1)
 
-                # 4. Translation (pinhole + depth scale)
-                obj_diameter = diameters.get(linemod_id, 0.1)
-                f_x, f_y = K[0, 0], K[1, 1]
-                c_x, c_y = K[0, 2], K[1, 2]
-                pinhole_X, pinhole_Y, pinhole_Z = pinhole_translation(bbox, f_x, f_y, c_x, c_y, obj_diameter, depth_scale)
+        # 4. Metrics
+        if gt_id not in meshes:
+            continue
+        model_pts = meshes[gt_id].to(device)
+        
+        if gt_id in SYMMETRIC_IDS:
+            err = compute_add_s(R_pred, t_pred_tensor, gt_R, gt_t, model_pts)
+        else:
+            err = compute_add(R_pred, t_pred_tensor, gt_R, gt_t, model_pts)
+        
+        if err < (0.1 * obj_diameter):
+            pass_count += 1
+        total_count += 1
 
-                t_pred_np = np.array([pinhole_X, pinhole_Y, pinhole_Z])
-                t_pred_tensor = torch.from_numpy(t_pred_np).float().to(device).view(3, 1)
+        # Compute separate translation and rotation errors
+        t_error = torch.norm(t_pred_tensor - gt_t).item()  # Euclidean distance (mm)
+        
+        # Rotation error: angular distance between R_pred and gt_R
+        R_diff = R_pred @ gt_R.T
+        trace = torch.clamp(R_diff.trace(), -1.0, 3.0)
+        r_error = torch.acos((trace - 1) / 2).item() * 180 / np.pi  # degrees
 
-                # 5. Metrics
-                if linemod_id not in meshes:
-                    continue
-                    
-                model_pts = meshes[linemod_id].to(device)
-                
-                if linemod_id in SYMMETRIC_IDS:
-                    err = compute_add_s(R_pred, t_pred_tensor, gt_R, gt_t, model_pts)
-                    metrics["add_s"].append(err)
-                else:
-                    err = compute_add(R_pred, t_pred_tensor, gt_R, gt_t, model_pts)
-                    metrics["add"].append(err)
-                
-                if err < (0.1 * obj_diameter):
-                    pass_count += 1
-                total_count += 1
-
-                # Compute separate translation and rotation errors
-                t_error = torch.norm(t_pred_tensor - gt_t).item()  # Euclidean distance (mm)
-                
-                # Rotation error: angular distance between R_pred and gt_R
-                R_diff = R_pred @ gt_R.T
-                trace = torch.clamp(R_diff.trace(), -1.0, 3.0)
-                r_error = torch.acos((trace - 1) / 2).item() * 180 / np.pi  # degrees
-
-                results.append({
-                    "file": filename,
-                    "obj_id": linemod_id,
-                    "R": R_pred.cpu().numpy().tolist(),
-                    "t": t_pred_np.flatten().tolist(), 
-                    "error": err,
-                    "t_error": t_error,
-                    "r_error": r_error,
-                    "gt_R": gt_R.cpu().numpy().tolist(),
-                    "gt_t": gt_t.cpu().numpy().flatten().tolist()
-                })
+        results.append({
+            "file": filename,
+            "obj_id": gt_id,
+            "R": R_pred.cpu().numpy().tolist(),
+            "t": t_pred_np.flatten().tolist(), 
+            "error": err,
+            "t_error": t_error,
+            "r_error": r_error,
+            "gt_R": gt_R.cpu().numpy().tolist(),
+            "gt_t": gt_t.cpu().numpy().flatten().tolist()
+        })
 
     if total_count > 0:
         print("\n" + "="*30)
@@ -234,7 +215,7 @@ def main():
 
     dataloader = DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=1,
         shuffle=False,
         num_workers=4,
         collate_fn=collate_fn,
