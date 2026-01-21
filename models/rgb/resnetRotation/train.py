@@ -231,6 +231,24 @@ def main():
                 optimizer, mode='min', factor=0.5, patience=3
             )
             print(f"[Epoch {epoch}] Optimizer recreated with lr={args.lr * 0.1:.1e} for fine-tuning")
+            
+            # Lower batch size to 32 when unfreezing backbone
+            train_loader = DataLoader(
+                train_ds,
+                batch_size=32,
+                shuffle=True,
+                num_workers=args.num_workers,
+                pin_memory=(device.type == "cuda"),
+                drop_last=True
+            )
+            val_loader = DataLoader(
+                val_ds,
+                batch_size=32,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=(device.type == "cuda"),
+                drop_last=False
+            )
 
         tr_ang, tr_rot = train_one_epoch(model, train_loader, optimizer, device, use_object_id)
         va_ang, va_rot = eval_one_epoch(model, val_loader, device, use_object_id)
