@@ -65,8 +65,10 @@ def setup_directories(output_dir, clean_output=False):
     
     for split in ['train', 'val']:
         os.makedirs(os.path.join(output_dir, 'images', split), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'depths', split), exist_ok=True)
         os.makedirs(os.path.join(output_dir, 'labels', split), exist_ok=True)
         os.makedirs(os.path.join(output_dir, 'camera_intrinsics', split), exist_ok=True)
+        os.makedirs(os.path.join(output_dir, 'pose_labels', split), exist_ok=True)
 
     os.makedirs(os.path.join(output_dir, "models"), exist_ok=True)
 
@@ -133,6 +135,7 @@ def process_dataset(dataset_root, output_dir, training_ratio=0.8, seed=42, clean
 
         gt_file = folder / 'gt.yml'
         rgb_dir = folder / 'rgb'
+        depth_dir = folder / 'depth'
         info_file = folder / 'info.yml'
 
         if not info_file.exists():
@@ -166,6 +169,7 @@ def process_dataset(dataset_root, output_dir, training_ratio=0.8, seed=42, clean
             # extend it to create the filename of the image by extending the img_id
             img_filename = f"{img_id:04d}.png"
             src_img_path = rgb_dir / img_filename
+            src_depth_path = depth_dir / img_filename
 
             if not src_img_path.exists():
                 continue #skip
@@ -175,22 +179,38 @@ def process_dataset(dataset_root, output_dir, training_ratio=0.8, seed=42, clean
 
             # We prepare the label for the current image
             yolo_labels = []
+            pose_labels = []  # Pose ground truth: rotation + translation (separate from YOLO labels)
             has_valid_object = False
 
+            # The folder name (e.g., "02") indicates the target object for this folder
+            # We only want to save the pose for THIS specific object, not all objects in the scene
+            target_object_id = int(folder.name)
+            
             for obj in objects:
                 original_id = obj['obj_id']
             
-                # If the object of interest is in our list
-                if original_id in CLASS_MAPPING:
+                # ONLY process the target object for this folder
+                # (e.g., folder "02" should only contain data for obj_id 2)
+                # This ensures bbox and pose labels are always aligned
+                if original_id == target_object_id and original_id in CLASS_MAPPING:
                     class_id = CLASS_MAPPING[original_id]
                     bbox = obj['obj_bb']
                     
-                    # Convert
+                    # Convert bbox to YOLO format
                     yolo_bbox = convert_bbox_to_yolo((img_w, img_h), bbox)
                     
                     # Formatted string --> class_id x_center y_center width height
                     label_str = f"{class_id} {yolo_bbox[0]:.6f} {yolo_bbox[1]:.6f} {yolo_bbox[2]:.6f} {yolo_bbox[3]:.6f}"
                     yolo_labels.append(label_str)
+                    
+                    # Pose ground truth: class_id R11 R12 R13 R21 R22 R23 R31 R32 R33 t1 t2 t3
+                    # cam_R_m2c is a 3x3 rotation matrix stored as a flat list (row-major)
+                    # cam_t_m2c is a 3D translation vector
+                    rot_matrix = obj['cam_R_m2c']
+                    translation = obj['cam_t_m2c']
+                    pose_str = f"{class_id} " + " ".join(f"{r:.8f}" for r in rot_matrix) + " " + " ".join(f"{t:.8f}" for t in translation)
+                    pose_labels.append(pose_str)
+                    
                     has_valid_object = True
             
             # Camera instrinsics --> 
@@ -217,19 +237,29 @@ def process_dataset(dataset_root, output_dir, training_ratio=0.8, seed=42, clean
                 unique_txt = unique_camera = f"{folder.name}_{img_id:04d}.txt"
                 
                 dst_img_path = os.path.join(output_dir, 'images', split, unique_name)
+                dst_depth_path = os.path.join(output_dir, 'depths', split, unique_name)
                 dst_label_path = os.path.join(output_dir, 'labels', split, unique_txt)
                 dst_camera_intrinsics_path = os.path.join(output_dir, 'camera_intrinsics', split, unique_camera)
+                dst_pose_path = os.path.join(output_dir, 'pose_labels', split, unique_txt)
                 
-                # Image
+                # Image (RGB)
                 shutil.copy(src_img_path, dst_img_path)
                 
-                # Labeling
+                # Depth image
+                if src_depth_path.exists():
+                    shutil.copy(src_depth_path, dst_depth_path)
+                
+                # Labeling (YOLO format for detection)
                 with open(dst_label_path, 'w') as f_out:
                     f_out.write('\n'.join(yolo_labels))
 
                 # Camera
                 with open(dst_camera_intrinsics_path, 'w') as f_out:
                     f_out.write(camera_str)
+                
+                # Pose labels (rotation matrix + translation)
+                with open(dst_pose_path, 'w') as f_out:
+                    f_out.write('\n'.join(pose_labels))
                 
                 total_images += 1
     

@@ -112,6 +112,66 @@ class LineModRotationPredictionTransform(object):
 
         return crop
 
+class LineModTranslationPredictionTransform(object):
+    def __init__(self, image_size=224, padding_factor=0.1, is_train=True):
+        """
+    Full-image transform (NO cropping).
+    Use this for translation training/inference when you want global context.
+    """
+    def __init__(self, image_size=224, is_train=True):
+        self.image_size = image_size
+        self.is_train = is_train
+
+        if self.is_train:
+            self.color_jitter = transforms.ColorJitter(
+                brightness=0.1,
+                contrast=0.1,
+                saturation=0.15,
+                hue=0.03,
+            )
+
+        self.normalize = transforms.Compose(
+            [
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225],
+                ),
+            ]
+        )
+
+    def _add_noise(self, image):
+        img_arr = np.array(image)
+        sigma = np.random.uniform(0, 5.0)
+        noise = np.random.normal(0, sigma, img_arr.shape)
+        noisy_img = np.clip(img_arr + noise, 0, 255).astype(np.uint8)
+        return Image.fromarray(noisy_img)
+
+    def __call__(self, image):
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
+
+        if self.is_train:
+            if random.random() < 0.6:
+                image = self.color_jitter(image)
+
+            if random.random() < 0.3:
+                radius = random.uniform(0.1, 0.8)
+                image = image.filter(ImageFilter.GaussianBlur(radius=radius))
+
+            if random.random() < 0.2:
+                image = self._add_noise(image)
+
+        return self.normalize(image)
+
+def get_train_translation_transforms(image_size=224):
+    return LineModTranslationPredictionTransform(image_size=image_size, is_train=True)
+
+
+def get_val_translation_transforms(image_size=224):
+    return LineModTranslationPredictionTransform(image_size=image_size, is_train=False)
+
 
 def get_train_transforms(image_size=224):
     return LineModRotationPredictionTransform(image_size=image_size, is_train=True)
