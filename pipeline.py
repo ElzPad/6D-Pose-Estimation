@@ -12,7 +12,9 @@ from pathlib import Path
 from ultralytics import YOLO
 from geometry.pinhole_camera_model import pinhole_translation
 from geometry.quaternion_to_rotation_matrix import quaternion_to_matrix
-from dataset.linemod_inference_dataset import LinemodInferenceDataset, collate_fn
+
+# from dataset.linemod_inference_dataset import LinemodInferenceDataset, collate_fn
+from dataset.linemod_inference_dataset_with_depth import LinemodInferenceDataset, collate_fn
 from torch.utils.data import DataLoader
 from augmentations import get_val_transforms, get_val_translation_transforms
 from models.yolo.load import load_yolo
@@ -23,8 +25,19 @@ from metrics.add import compute_add, compute_add_s
 
 # Mapping: YOLO Class ID (0-12) -> LINEMOD Object ID (1-15)
 YOLO_TO_LINEMOD_ID = {
-    0: 1, 1: 2, 2: 4, 3: 5, 4: 6, 5: 8, 6: 9,
-    7: 10, 8: 11, 9: 12, 10: 13, 11: 14, 12: 15,
+    0: 1,
+    1: 2,
+    2: 4,
+    3: 5,
+    4: 6,
+    5: 8,
+    6: 9,
+    7: 10,
+    8: 11,
+    9: 12,
+    10: 13,
+    11: 14,
+    12: 15,
 }
 
 LINEMOD_ID_TO_YOLO = {v: k for k, v in YOLO_TO_LINEMOD_ID.items()}
@@ -38,7 +51,12 @@ def get_args():
     parser.add_argument("--dataset_root", type=str, default="data/linemod_yolo")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
     parser.add_argument("--models_info", type=str, default="data/linemod_yolo/models/models_info.yml")
-    parser.add_argument("--models_dir", type=str, default="data/linemod/Linemod_preprocessed/models", help="Path to directory containing .ply files")
+    parser.add_argument(
+        "--models_dir",
+        type=str,
+        default="data/linemod/Linemod_preprocessed/models",
+        help="Path to directory containing .ply files",
+    )
 
     parser.add_argument("--yolo_weights", type=str, required=True)
     parser.add_argument("--resnet_rot_weights", type=str, required=True)
@@ -52,12 +70,14 @@ def get_args():
 
     return parser.parse_args()
 
+
 def load_diameters(path):
     if not os.path.exists(path):
         raise FileNotFoundError(f"models_info.yml not found at {path}")
     with open(path, "r") as f:
         data = yaml.safe_load(f)
     return {int(k): v["diameter"] for k, v in data.items()}
+
 
 def load_meshes(models_dir):
     print(f"Loading 3D meshes from {models_dir}...")
@@ -83,6 +103,7 @@ def load_meshes(models_dir):
             print(f"Error loading {path}: {e}")
 
     return meshes
+
 
 def save_results(results, output_path):
     print(f"Saving {len(results)} predictions to {output_path}...")
@@ -135,9 +156,7 @@ def draw_bbox_rgb(img_rgb, bbox_xywh, label=None, thickness=2):
         y_bg2 = min(org[1] + baseline + pad, h - 1)
 
         cv2.rectangle(out_bgr, (x_bg1, y_bg1), (x_bg2, y_bg2), (0, 0, 0), -1)
-        cv2.putText(
-            out_bgr, label, org, font, font_scale, (0, 255, 0), font_thickness, lineType=cv2.LINE_AA
-        )
+        cv2.putText(out_bgr, label, org, font, font_scale, (0, 255, 0), font_thickness, lineType=cv2.LINE_AA)
 
     return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
 
@@ -184,12 +203,15 @@ def draw_pose_axes_rgb(img_rgb, K, R_pred, t_pred, axis_len, thickness=1):
         t = np.asarray(t_pred).reshape(3, 1)
 
     # Object-frame points: origin + endpoints
-    pts_obj = np.array([
-        [0.0, 0.0, 0.0],
-        [axis_len, 0.0, 0.0],  # X
-        [0.0, axis_len, 0.0],  # Y
-        [0.0, 0.0, axis_len],  # Z
-    ], dtype=np.float32)
+    pts_obj = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [axis_len, 0.0, 0.0],  # X
+            [0.0, axis_len, 0.0],  # Y
+            [0.0, 0.0, axis_len],  # Z
+        ],
+        dtype=np.float32,
+    )
 
     # Transform into camera frame: P_cam = R * P_obj + t
     pts_cam = (R @ pts_obj.T + t).T  # (4,3)
@@ -210,14 +232,15 @@ def draw_pose_axes_rgb(img_rgb, K, R_pred, t_pred, axis_len, thickness=1):
 
     # Conventional axis colors in BGR:
     # X = Red, Y = Green, Z = Blue (in BGR that’s (0,0,255), (0,255,0), (255,0,0))
-    draw_line_if_valid(1, (0, 0, 255))   # X
-    draw_line_if_valid(2, (0, 255, 0))   # Y
-    draw_line_if_valid(3, (255, 0, 0))   # Z
+    draw_line_if_valid(1, (0, 0, 255))  # X
+    draw_line_if_valid(2, (0, 255, 0))  # Y
+    draw_line_if_valid(3, (255, 0, 0))  # Z
 
     # draw origin point
     cv2.circle(out_bgr, tuple(o), 4, (255, 255, 255), -1, lineType=cv2.LINE_AA)
 
     return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+
 
 def rotation_error_degrees(R_pred: torch.Tensor, R_gt: torch.Tensor) -> float:
     """
@@ -227,6 +250,7 @@ def rotation_error_degrees(R_pred: torch.Tensor, R_gt: torch.Tensor) -> float:
     tr = torch.clamp(torch.trace(R_diff), -1.0, 3.0)
     cos_theta = torch.clamp((tr - 1.0) / 2.0, -1.0, 1.0)
     return float(torch.acos(cos_theta).item() * 180.0 / np.pi)
+
 
 def run_inference(
     dataloader,
@@ -321,7 +345,7 @@ def run_inference(
         obj_diameter = diameters.get(gt_id, 0.1)
 
         # pred_bbox is (cx, cy, w, h) in pixels
-        img_h, img_w = img_np.shape[:2]   # or get from original frame, same thing here
+        img_h, img_w = img_np.shape[:2]  # or get from original frame, same thing here
         cx, cy, bw, bh = pred_bbox
         pred_bbox_norm = np.array([cx / img_w, cy / img_h, bw / img_w, bh / img_h], dtype=np.float32)
         bbox_tensor = torch.tensor(pred_bbox_norm, dtype=torch.float32, device=device).unsqueeze(0)
@@ -329,15 +353,17 @@ def run_inference(
         diameter_tensor = torch.tensor([obj_diameter], dtype=torch.float32, device=device)
         full_img = translation_transformer(img_np).to(device)
         with torch.no_grad():
-            t_pred = resnet_translation_model(full_img.unsqueeze(0), torch.tensor([gt_id], device=device), bbox_tensor, diameter_tensor)
-        
+            t_pred = resnet_translation_model(
+                full_img.unsqueeze(0), torch.tensor([gt_id], device=device), bbox_tensor, diameter_tensor
+            )
+
         # Use predicted depth and estimate x and y using pinhole camera model
         # f_x, f_y = K[0, 0], K[1, 1]
         # c_x, c_y = K[0, 2], K[1, 2]
         # pinhole_X, pinhole_Y, pinhole_Z = pinhole_translation(
         #     pred_bbox, f_x, f_y, c_x, c_y, obj_diameter, precomputed_depth=t_pred[0].cpu().numpy()[2] * 1000
         # )
-        # 
+        #
         # t_pred_np = np.array([pinhole_X, pinhole_Y, pinhole_Z])
         # t_pred_tensor = torch.from_numpy(t_pred_np).float().to(device).view(3, 1)
         # or
@@ -438,7 +464,7 @@ def main():
     )
 
     print("Loading models...")
-    yolo_model = load_yolo(args.yolo_weights)
+    yolo_model = load_yolo(args.yolo_weights, device=device)
     if hasattr(yolo_model, "to"):
         yolo_model.to(device)
 
