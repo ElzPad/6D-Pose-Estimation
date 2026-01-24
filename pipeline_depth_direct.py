@@ -343,6 +343,10 @@ def run_inference(
         gt_R = target["gt_R"].to(device)
         gt_t = target["gt_t"].to(device)
 
+        if gt_id not in meshes:
+            continue
+        model_pts = meshes[gt_id].to(device)
+
         # 1) YOLO stage
         images_tensor = torch.stack(batch_images).to(device)
         yolo_result = yolo_model(images_tensor, verbose=False)[0]
@@ -431,11 +435,59 @@ def run_inference(
         if pred_z is None:
             pred_z = t_pred_np[2]  # original predicted Z
 
+        # back-projection depth pixel to a 3D point on the surface in camera coordinates
+        f_x, f_y = K[0, 0], K[1, 1]
+        cx0, cy0 = K[0, 2], K[1, 2]
+        # surface_point_cam
+        P_cam = np.array(
+            pinhole_translation(
+                bbox=pred_bbox,
+                f_x=f_x,
+                f_y=f_y,
+                c_x=cx0,
+                c_y=cy0,
+                diameter=None,  # ignored
+                precomputed_depth=pred_z,  # mm
+            ),
+            dtype=np.float32,
+        )
+
+        # rotate the object mesh points (but centered at the origin)
+        assert model_pts.ndim == 2 and model_pts.shape[1] == 3
+        assert R_pred.shape == (3, 3)
+        # Rotate mesh: object frame to camera frame
+        # N = num_points in the mesh
+        model_pts_cam = (R_pred @ model_pts.T).T  # [N, 3]
+
+        # project rotated mesh points onto the camera ray
+        #
+        # calculate the camera ray from bbox center:
+        u = cx
+        v = cy
+        ray_dir = torch.tensor(
+            [(u - cx0) / f_x, (v - cy0) / f_y, 1.0],
+            dtype=torch.float32,
+            device=model_pts_cam.device,
+        )
+        ray_dir = ray_dir / torch.norm(ray_dir)  # (normalization)
+
+        # scalar projection of each vertex onto the ray
+        s = model_pts_cam @ ray_dir  # [N]
+        valid = s > 0
+        s_valid = s[valid]  # (keep only those in front of the camera and drop those behind the camera)
+        s_front = torch.min(s_valid)  # distance (along the ray) from the object origin to the visible surface
+
+        # --- Update both t_pred_np and t_pred_tensor ---
+        # t_pred_tensor[:, 0] = t_cam  # [3,1] PyTorch tensor
+        # t_pred_np[:] = t_cam.cpu().numpy()  # [3] NumPy array
+
+        #####
         # Z in NumPy array (1D)
-        t_pred_np[2] = pred_z
+        t_pred_np[2] = pred_z + float(s_front)
 
         # Z in PyTorch tensor (shape [3,1])
-        t_pred_tensor[2, 0] = float(pred_z)
+        t_pred_tensor[2, 0] = float(pred_z) + float(s_front)
+        ##########
 
         # --- Save visualization image (bbox + 3D axes) ---
         if save_images:
@@ -463,10 +515,6 @@ def run_inference(
             cv2.imwrite(out_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
 
         # 4) Metrics
-        if gt_id not in meshes:
-            continue
-        model_pts = meshes[gt_id].to(device)
-
         if gt_id in SYMMETRIC_IDS:
             err = compute_add_s(R_pred, t_pred_tensor, gt_R, gt_t, model_pts)
         else:
