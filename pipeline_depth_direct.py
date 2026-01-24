@@ -438,19 +438,6 @@ def run_inference(
         # back-projection depth pixel to a 3D point on the surface in camera coordinates
         f_x, f_y = K[0, 0], K[1, 1]
         cx0, cy0 = K[0, 2], K[1, 2]
-        # surface_point_cam
-        P_cam = np.array(
-            pinhole_translation(
-                bbox=pred_bbox,
-                f_x=f_x,
-                f_y=f_y,
-                c_x=cx0,
-                c_y=cy0,
-                diameter=None,  # ignored
-                precomputed_depth=pred_z,  # mm
-            ),
-            dtype=np.float32,
-        )
 
         # rotate the object mesh points (but centered at the origin)
         assert model_pts.ndim == 2 and model_pts.shape[1] == 3
