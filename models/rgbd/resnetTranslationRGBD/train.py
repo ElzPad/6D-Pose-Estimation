@@ -21,14 +21,12 @@ def parse_args():
     p.add_argument("--split_percentage", type=float, default=0.8,
                    help="Fraction used for train in your dataset implementation.")
     p.add_argument("--num_workers", type=int, default=0)
-    p.add_argument("--save_dir", type=str, default="runs_resnet")
-    p.add_argument("--run_name", type=str, default="resnet50_tra")
+    p.add_argument("--save_dir", type=str, default="runs")
+    p.add_argument("--run_name", type=str, default="resnet_translation_rgbd")
     p.add_argument("--freeze_backbone", action="store_true",
                    help="If set, freeze all ResNet layers except the final FC head.")
     p.add_argument("--unfreeze_epoch", type=int, default=30,
                    help="Epoch at which to unfreeze backbone (only used if freeze_backbone is set).")
-    p.add_argument("--use_object_id", action="store_true",
-                   help="If set, use object identity conditioning (one-hot) for multi-object training.")
     p.add_argument("--depth_init", type=str, default="avg",
                    choices=["avg", "zero", "green", "scaled_avg"],
                    help="How to initialize depth channel weights: avg (mean of RGB), zero, green (copy green), scaled_avg")
@@ -46,7 +44,7 @@ NUM_OBJECTS = len(LINEMOD_OBJECT_IDS)
 # Create mapping from object_id to one-hot index
 OBJECT_ID_TO_INDEX = {obj_id: idx for idx, obj_id in enumerate(LINEMOD_OBJECT_IDS)}
 
-def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
+def train_one_epoch(model, loader, optimizer, device, use_object_id=True):
     model.train()
     total_loss = 0.0
     n = 0
@@ -110,13 +108,19 @@ def main():
         root_dir=args.dataset_path,
         object_id=args.object_id if args.object_id != 0 else None,
         split="train",
-        split_percentage=args.split_percentage
+        split_percentage=args.split_percentage,
+        use_depth=True,
+        depth_unit_scale=1000.0,
+        depth_clip_m=3.0,
     )
     val_ds = LineModTranslationDataset(
         root_dir=args.dataset_path,
         object_id=args.object_id if args.object_id != 0 else None,
         split="val",
-        split_percentage=args.split_percentage
+        split_percentage=args.split_percentage,
+        use_depth=True,
+        depth_unit_scale=1000.0,
+        depth_clip_m=3.0,
     )
 
     train_loader = DataLoader(
