@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from dataset.linemod_rotation_dataset import LineModRotationDataset
-from .model import ResNetRotation, ResNetRotationWithObjectID
+from .model import ResNetRotation, ResNetRotationWithObjectID, ResNetRotationRGBD
 
 def parse_args():
     p = argparse.ArgumentParser("Fine-tune ResNet50 for LINEMOD rotation (quaternion)")
@@ -29,6 +29,8 @@ def parse_args():
                    help="Epoch at which to unfreeze backbone (only used if freeze_backbone is set).")
     p.add_argument("--use_object_id", action="store_true",
                    help="If set, use object identity conditioning (one-hot) for multi-object training.")
+    p.add_argument("--use_depth", action="store_true",
+                   help="If set, load depth masks and fuse RGB+Depth features (extension).")
     p.add_argument("--resume", type=str, default=None,
                    help="Path to checkpoint to resume training from. Loads model weights only (not optimizer).")
     p.add_argument("--device", type=str, default="cuda")
@@ -65,7 +67,7 @@ def quat_angle_error_deg(q_pred, q_gt):
     return (ang * 180.0 / torch.pi).mean().item()
 
 
-def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
+def train_one_epoch(model, loader, optimizer, device, use_object_id=False, use_depth=False):
     model.train()
     total_ang = 0.0
     total_rot_loss = 0.0
@@ -73,18 +75,30 @@ def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
 
     pbar = tqdm(loader, desc="Training", leave=False)
     for batch in pbar:
-        if use_object_id:
+        if use_depth and use_object_id:
+            imgs, depth_masks, q_gt, object_ids = batch
+        elif use_depth and (not use_object_id):
+            imgs, depth_masks, q_gt, _ = batch
+            object_ids = None
+        elif (not use_depth) and use_object_id:
             imgs, q_gt, object_ids = batch
+            depth_masks = None
         else:
             imgs, q_gt, _ = batch
             object_ids = None
+            depth_masks = None
 
         imgs = imgs.to(device, non_blocking=True).float()
         q_gt = q_gt.to(device, non_blocking=True).float()
+        if use_depth:
+            depth_masks = depth_masks.to(device, non_blocking=True).float()
 
         optimizer.zero_grad(set_to_none=True)
 
-        q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
+        if use_depth:
+            q_pred = model(imgs, depth_masks, object_ids if use_object_id else None)
+        else:
+            q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
 
         # Separate losses per head
         loss_rot = quat_geodesic_loss(q_pred, q_gt)
@@ -109,7 +123,7 @@ def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
     return total_ang / denom, total_rot_loss / denom
 
 @torch.no_grad()
-def eval_one_epoch(model, loader, device, use_object_id=False):
+def eval_one_epoch(model, loader, device, use_object_id=False, use_depth=False):
     model.eval()
     total_ang = 0.0
     total_rot_loss = 0.0
@@ -117,16 +131,28 @@ def eval_one_epoch(model, loader, device, use_object_id=False):
 
     pbar = tqdm(loader, desc="Validation", leave=False)
     for batch in pbar:
-        if use_object_id:
+        if use_depth and use_object_id:
+            imgs, depth_masks, q_gt, object_ids = batch
+        elif use_depth and (not use_object_id):
+            imgs, depth_masks, q_gt, _ = batch
+            object_ids = None
+        elif (not use_depth) and use_object_id:
             imgs, q_gt, object_ids = batch
+            depth_masks = None
         else:
             imgs, q_gt, _ = batch
             object_ids = None
+            depth_masks = None
 
         imgs = imgs.to(device, non_blocking=True).float()
         q_gt = q_gt.to(device, non_blocking=True).float()
+        if use_depth:
+            depth_masks = depth_masks.to(device, non_blocking=True).float()
         
-        q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
+        if use_depth:
+            q_pred = model(imgs, depth_masks, object_ids if use_object_id else None)
+        else:
+            q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
 
         loss_rot = quat_geodesic_loss(q_pred, q_gt)
 
@@ -150,13 +176,15 @@ def main():
         root_dir=args.dataset_path,
         object_id=args.object_id if args.object_id != 0 else None,
         split="train",
-        split_percentage=args.split_percentage
+        split_percentage=args.split_percentage,
+        return_depth=args.use_depth
     )
     val_ds = LineModRotationDataset(
         root_dir=args.dataset_path,
         object_id=args.object_id if args.object_id != 0 else None,
         split="val",
-        split_percentage=args.split_percentage
+        split_percentage=args.split_percentage,
+        return_depth=args.use_depth
     )
 
     train_loader = DataLoader(
@@ -177,15 +205,27 @@ def main():
     )
 
     use_object_id = args.use_object_id
-    if use_object_id:
-        print("Using ResNetRotationWithObjectID (object identity conditioning enabled)")
-        model = ResNetRotationWithObjectID(
+    use_depth = args.use_depth
+
+    if use_depth:
+        print("Using ResNetRotationRGBD (RGB + depth fusion)")
+        model = ResNetRotationRGBD(
+            depth_feat_dim=256,
             num_objects=NUM_OBJECTS,
-            freeze_backbone=args.freeze_backbone
+            use_object_id=use_object_id,
+            freeze_backbone=args.freeze_backbone,
         ).to(device)
     else:
-        print("Using ResNetRotation (single object or no conditioning)")
-        model = ResNetRotation(freeze_backbone=args.freeze_backbone).to(device)
+        if use_object_id:
+            print("Using ResNetRotationWithObjectID (object identity conditioning enabled)")
+            model = ResNetRotationWithObjectID(
+                num_objects=NUM_OBJECTS,
+                freeze_backbone=args.freeze_backbone
+            ).to(device)
+        else:
+            print("Using ResNetRotation (single object or no conditioning)")
+            model = ResNetRotation(freeze_backbone=args.freeze_backbone).to(device)
+
 
     resumed_epoch = 0
     if args.resume:
@@ -250,8 +290,8 @@ def main():
                 drop_last=False
             )
 
-        tr_ang, tr_rot = train_one_epoch(model, train_loader, optimizer, device, use_object_id)
-        va_ang, va_rot = eval_one_epoch(model, val_loader, device, use_object_id)
+        tr_ang, tr_rot = train_one_epoch(model, train_loader, optimizer, device, use_object_id, use_depth)
+        va_ang, va_rot = eval_one_epoch(model, val_loader, device, use_object_id, use_depth)
 
         scheduler.step(va_ang)
         current_lr = optimizer.param_groups[0]['lr']
