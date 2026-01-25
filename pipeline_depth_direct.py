@@ -14,7 +14,7 @@ from geometry.pinhole_camera_model import pinhole_translation
 from geometry.quaternion_to_rotation_matrix import quaternion_to_matrix
 
 # from dataset.linemod_inference_dataset import LinemodInferenceDataset, collate_fn
-from dataset.linemod_inference_dataset import LinemodInferenceDataset, collate_fn
+from dataset.linemod_inference_dataset_with_depth import LinemodInferenceDataset, collate_fn
 from torch.utils.data import DataLoader
 from augmentations import get_val_transforms, get_val_translation_transforms
 from models.yolo.load import load_yolo
@@ -242,6 +242,58 @@ def draw_pose_axes_rgb(img_rgb, K, R_pred, t_pred, axis_len, thickness=1):
     return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
 
 
+def depth_mm_at_bbox_center(depth: torch.Tensor, bbox, window=5):
+    """
+    Retrieve the depth value (in millimeters) at the center of a bounding box
+    from a depth map tensor, with a local fallback if the center pixel is invalid.
+
+    Args:
+        depth (torch.Tensor): HxW depth map (uint16), values in millimeters.
+        bbox (tuple): Bounding box (cx, cy, bw, bh) in pixel coordinates.
+        window (int): Odd window size used to search nearby pixels if the center
+            depth is 0 (invalid or missing).
+
+    Returns:
+        int or None: Depth at the bounding-box center in millimeters, or None if
+        no valid depth is found.
+    """
+    assert depth.ndim == 2, "Depth must be HxW"
+
+    # Convert to int32 to allow comparisons
+    depth = depth.to(torch.int32)
+
+    cx, cy, _, _ = bbox
+    H, W = depth.shape
+
+    # Center pixel (x = column, y = row)
+    u = int(round(cx))
+    v = int(round(cy))
+
+    # Clamp to image bounds
+    u = max(0, min(u, W - 1))
+    v = max(0, min(v, H - 1))
+
+    # Try exact center
+    d = int(depth[v, u].item())
+    if d > 0:
+        return d
+
+    # Fallback: search small neighborhood
+    half = window // 2
+    u0 = max(0, u - half)
+    u1 = min(W, u + half + 1)
+    v0 = max(0, v - half)
+    v1 = min(H, v + half + 1)
+
+    patch = depth[v0:v1, u0:u1]
+    valid = patch[patch > 0]
+
+    if valid.numel() == 0:
+        return None
+
+    return int(torch.median(valid).item())
+
+
 def rotation_error_degrees(R_pred: torch.Tensor, R_gt: torch.Tensor) -> float:
     """
     Angular distance between two rotation matrices in degrees.
@@ -281,7 +333,8 @@ def run_inference(
     resnet_translation_model.eval()
     print(f"Running inference on {len(dataloader.dataset)} images...")
 
-    for batch_images, batch_targets in tqdm(dataloader):
+    # batch = 1 -> no batch dimension
+    for batch_images, batch_depths, batch_targets in tqdm(dataloader):
         target = batch_targets[0]
         filename = target["image_id"]
 
@@ -289,6 +342,10 @@ def run_inference(
         gt_id = int(target["gt_class_id"])
         gt_R = target["gt_R"].to(device)
         gt_t = target["gt_t"].to(device)
+
+        if gt_id not in meshes:
+            continue
+        model_pts = meshes[gt_id].to(device)
 
         # 1) YOLO stage
         images_tensor = torch.stack(batch_images).to(device)
@@ -371,6 +428,54 @@ def run_inference(
         t_pred_np = t_pred[0].cpu().numpy() * 1000
         t_pred_tensor = t_pred[0].view(3, 1).to(device) * 1000
 
+        depth = batch_depths[0]
+        pred_z = depth_mm_at_bbox_center(depth, pred_bbox)
+
+        # Fallback if center depth is invalid
+        if pred_z is None:
+            pred_z = t_pred_np[2]  # original predicted Z
+
+        # back-projection depth pixel to a 3D point on the surface in camera coordinates
+        f_x, f_y = K[0, 0], K[1, 1]
+        cx0, cy0 = K[0, 2], K[1, 2]
+
+        # rotate the object mesh points (but centered at the origin)
+        assert model_pts.ndim == 2 and model_pts.shape[1] == 3
+        assert R_pred.shape == (3, 3)
+        # Rotate mesh: object frame to camera frame
+        # N = num_points in the mesh
+        model_pts_cam = (R_pred @ model_pts.T).T  # [N, 3]
+
+        # project rotated mesh points onto the camera ray
+        #
+        # calculate the camera ray from bbox center:
+        u = cx
+        v = cy
+        ray_dir = torch.tensor(
+            [(u - cx0) / f_x, (v - cy0) / f_y, 1.0],
+            dtype=torch.float32,
+            device=model_pts_cam.device,
+        )
+        ray_dir = ray_dir / torch.norm(ray_dir)  # (normalization)
+
+        # scalar projection of each vertex onto the ray
+        s = model_pts_cam @ ray_dir  # [N]
+        valid = s > 0
+        s_valid = s[valid]  # (keep only those in front of the camera and drop those behind the camera)
+        s_front = torch.min(s_valid)  # distance (along the ray) from the object origin to the visible surface
+
+        # --- Update both t_pred_np and t_pred_tensor ---
+        # t_pred_tensor[:, 0] = t_cam  # [3,1] PyTorch tensor
+        # t_pred_np[:] = t_cam.cpu().numpy()  # [3] NumPy array
+
+        #####
+        # Z in NumPy array (1D)
+        t_pred_np[2] = pred_z + float(s_front)
+
+        # Z in PyTorch tensor (shape [3,1])
+        t_pred_tensor[2, 0] = float(pred_z) + float(s_front)
+        ##########
+
         # --- Save visualization image (bbox + 3D axes) ---
         if save_images:
             # bbox label (optional)
@@ -397,10 +502,6 @@ def run_inference(
             cv2.imwrite(out_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
 
         # 4) Metrics
-        if gt_id not in meshes:
-            continue
-        model_pts = meshes[gt_id].to(device)
-
         if gt_id in SYMMETRIC_IDS:
             err = compute_add_s(R_pred, t_pred_tensor, gt_R, gt_t, model_pts)
         else:
