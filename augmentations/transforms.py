@@ -3,7 +3,7 @@ import torch
 import random
 import numpy as np
 from torchvision import transforms
-
+import cv2
 
 class LineModRotationPredictionTransform(object):
     def __init__(self, image_size=224, padding_factor=0.1, is_train=True):
@@ -123,27 +123,30 @@ class LineModTranslationPredictionTransform(object):
         self.is_train = is_train
 
         if self.is_train:
-            self.color_jitter = transforms.ColorJitter(
-                brightness=0.1,
-                contrast=0.1,
-                saturation=0.15,
-                hue=0.03,
-            )
-
-        self.normalize = transforms.Compose(
-            [
-                transforms.Resize((image_size, image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225],
+            self.augment = transforms.Compose([
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(
+                    brightness=0.08,
+                    contrast=0.08,
+                    saturation=0.10,
+                    hue=0.02,
                 ),
-            ]
-        )
+            ])
+        else:
+            self.augment = None
+
+        self.normalize = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ])
 
     def _add_noise(self, image):
         img_arr = np.array(image)
-        sigma = np.random.uniform(0, 5.0)
+        sigma = np.random.uniform(0, 2.0)  # Lowered max sigma
         noise = np.random.normal(0, sigma, img_arr.shape)
         noisy_img = np.clip(img_arr + noise, 0, 255).astype(np.uint8)
         return Image.fromarray(noisy_img)
@@ -153,17 +156,120 @@ class LineModTranslationPredictionTransform(object):
             image = Image.fromarray(image)
 
         if self.is_train:
-            if random.random() < 0.6:
-                image = self.color_jitter(image)
-
-            if random.random() < 0.3:
-                radius = random.uniform(0.1, 0.8)
+            image = self.augment(image)
+            # Gaussian Blur (10% chance, lower radius)
+            if random.random() < 0.1:
+                radius = random.uniform(0.05, 0.4)
                 image = image.filter(ImageFilter.GaussianBlur(radius=radius))
-
-            if random.random() < 0.2:
+            # Gaussian Noise (10% chance, lower sigma)
+            if random.random() < 0.1:
                 image = self._add_noise(image)
 
         return self.normalize(image)
+
+class LineModRGBDTranslationTransform(object):
+    """
+    Full-image transform for RGBD (4-channel) input.
+    Applies augmentations to RGB channels only, normalizes depth separately,
+    then concatenates into a 4-channel tensor.
+    """
+    def __init__(self, image_size=224, is_train=True, depth_unit_scale=1000.0, depth_clip_m=3.0):
+        """
+        Args:
+            image_size: Target size for resizing
+            is_train: Whether to apply augmentations
+            depth_unit_scale: Unit to define scale conversion (LINEMOD uses mm, we transform to m)
+            depth_clip_m: Value (in meters) to clip depth
+        """
+        self.image_size = image_size
+        self.is_train = is_train
+        self.depth_unit_scale = depth_unit_scale
+        self.depth_clip_m = depth_clip_m
+
+        if self.is_train:
+            self.augment = transforms.Compose([
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(
+                    brightness=0.08,
+                    contrast=0.08,
+                    saturation=0.10,
+                    hue=0.02,
+                ),
+            ])
+        else:
+            self.augment = None
+
+        # RGB normalization (ImageNet stats)
+        self.rgb_normalize = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ])
+
+    def _add_noise(self, image):
+        img_arr = np.array(image)
+        sigma = np.random.uniform(0, 2.0)  # Lowered max sigma
+        noise = np.random.normal(0, sigma, img_arr.shape)
+        noisy_img = np.clip(img_arr + noise, 0, 255).astype(np.uint8)
+        return Image.fromarray(noisy_img)
+
+    def _normalize_depth(self, depth):
+        """
+        Normalize depth to [0, 1] range and resize.
+        Args:
+            depth: numpy array (H, W), uint16 depth in mm
+        Returns:
+            torch.Tensor of shape (1, image_size, image_size)
+        """
+        # Convert to float32 and normalize to [0, 1]
+        depth = depth.astype(np.float32)
+
+        if self.depth_unit_scale > 0:
+            depth = depth / self.depth_unit_scale  # mm -> m
+
+        valid = (depth > 0).astype(np.float32)
+        depth = np.clip(depth, 0.0, self.depth_clip_m)
+        depth_norm = (depth / self.depth_clip_m) * valid
+        
+        # Resize using cv2 (preserves float precision, no 8-bit quantization)
+        depth_resized = cv2.resize(depth_norm, (self.image_size, self.image_size), interpolation=cv2.INTER_LINEAR)
+        
+        # Convert to tensor [0, 1] - no precision loss
+        depth_tensor = torch.from_numpy(depth_resized)
+        return depth_tensor.unsqueeze(0)  # (1, H, W)
+
+    def __call__(self, rgb_image, depth_image):
+        """
+        Args:
+            rgb_image: PIL.Image or numpy array (H, W, 3), RGB
+            depth_image: numpy array (H, W), uint16 depth in mm
+        Returns:
+            torch.Tensor of shape (4, image_size, image_size) - RGBD
+        """
+        if not isinstance(rgb_image, Image.Image):
+            rgb_image = Image.fromarray(rgb_image)
+
+        # Apply augmentations to RGB only (depth should not have color jitter)
+        if self.is_train:
+            rgb_image = self.augment(rgb_image)
+            # Gaussian Blur (10% chance, lower radius)
+            if random.random() < 0.1:
+                radius = random.uniform(0.05, 0.4)
+                rgb_image = rgb_image.filter(ImageFilter.GaussianBlur(radius=radius))
+            # Gaussian Noise (10% chance, lower sigma)
+            if random.random() < 0.1:
+                rgb_image = self._add_noise(rgb_image)
+
+        # Normalize RGB (3, H, W)
+        rgb_tensor = self.rgb_normalize(rgb_image)
+        # Normalize depth (1, H, W)
+        depth_tensor = self._normalize_depth(depth_image)
+        # Concatenate to RGBD (4, H, W)
+        rgbd_tensor = torch.cat([rgb_tensor, depth_tensor], dim=0)
+        return rgbd_tensor
 
 def get_train_translation_transforms(image_size=224):
     return LineModTranslationPredictionTransform(image_size=image_size, is_train=True)
@@ -179,3 +285,11 @@ def get_train_transforms(image_size=224):
 
 def get_val_transforms(image_size=224):
     return LineModRotationPredictionTransform(image_size=image_size, is_train=False)
+
+
+def get_train_rgbd_translation_transforms(image_size=224, depth_unit_scale=1000.0, depth_clip_m=3.0):
+    return LineModRGBDTranslationTransform(image_size=image_size, is_train=True, depth_unit_scale=depth_unit_scale, depth_clip_m=depth_clip_m)
+
+
+def get_val_rgbd_translation_transforms(image_size=224, depth_unit_scale=1000.0, depth_clip_m=3.0):
+    return LineModRGBDTranslationTransform(image_size=image_size, is_train=False, depth_unit_scale=depth_unit_scale, depth_clip_m=depth_clip_m)
