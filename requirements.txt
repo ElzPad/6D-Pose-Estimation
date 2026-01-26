@@ -1,6 +1,7 @@
 gdown
 matplotlib
 numpy<2
+open3d
 opencv-python
 Pillow
 plotly
