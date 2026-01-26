@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ..depthCNN import DepthFeatureExtractor
+from models.rgbd.depthCNN.model import DepthFeatureExtractor
 from torchvision.models import resnet50, ResNet50_Weights
 
 LINEMOD_OBJECT_IDS = [1, 2, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15]
