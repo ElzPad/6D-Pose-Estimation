@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from dataset.linemod_rotation_dataset import LineModRotationDataset
-from .model import ResNetRotation, ResNetRotationWithObjectID
+from .model import ResNetRotationRGBD
 
 def parse_args():
     p = argparse.ArgumentParser("Fine-tune ResNet50 for LINEMOD rotation (quaternion)")
@@ -27,8 +27,6 @@ def parse_args():
                    help="If set, freeze all ResNet layers except the final FC head.")
     p.add_argument("--unfreeze_epoch", type=int, default=30,
                    help="Epoch at which to unfreeze backbone (only used if freeze_backbone is set).")
-    p.add_argument("--use_object_id", action="store_true",
-                   help="If set, use object identity conditioning (one-hot) for multi-object training.")
     p.add_argument("--resume", type=str, default=None,
                    help="Path to checkpoint to resume training from. Loads model weights only (not optimizer).")
     p.add_argument("--device", type=str, default="cuda")
@@ -65,7 +63,7 @@ def quat_angle_error_deg(q_pred, q_gt):
     return (ang * 180.0 / torch.pi).mean().item()
 
 
-def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
+def train_one_epoch(model, loader, optimizer, device):
     model.train()
     total_ang = 0.0
     total_rot_loss = 0.0
@@ -73,33 +71,23 @@ def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
 
     pbar = tqdm(loader, desc="Training", leave=False)
     for batch in pbar:
-        if use_object_id:
-            imgs, q_gt, object_ids = batch
-        else:
-            imgs, q_gt, _ = batch
-            object_ids = None
-
+        imgs, depth_masks, q_gt, object_ids = batch
         imgs = imgs.to(device, non_blocking=True).float()
+        depth_masks = depth_masks.to(device, non_blocking=True).float()
         q_gt = q_gt.to(device, non_blocking=True).float()
+        object_ids = object_ids.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-
-        q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
-
-        # Separate losses per head
+        q_pred = model(imgs, depth_masks, object_ids)
         loss_rot = quat_geodesic_loss(q_pred, q_gt)
-       
-        # One optimizer step over the shared trunk + both heads
         loss_rot.backward()
         optimizer.step()
 
         bs = imgs.size(0)
         ang_deg = quat_angle_error_deg(q_pred, q_gt)
-
         total_rot_loss += loss_rot.item() * bs
         total_ang += ang_deg * bs
         n += bs
-
         pbar.set_postfix(
             loss=f"{loss_rot.item():.4f}",
             ang=f"{ang_deg:.2f}°"
@@ -109,7 +97,7 @@ def train_one_epoch(model, loader, optimizer, device, use_object_id=False):
     return total_ang / denom, total_rot_loss / denom
 
 @torch.no_grad()
-def eval_one_epoch(model, loader, device, use_object_id=False):
+def eval_one_epoch(model, loader, device):
     model.eval()
     total_ang = 0.0
     total_rot_loss = 0.0
@@ -117,22 +105,15 @@ def eval_one_epoch(model, loader, device, use_object_id=False):
 
     pbar = tqdm(loader, desc="Validation", leave=False)
     for batch in pbar:
-        if use_object_id:
-            imgs, q_gt, object_ids = batch
-        else:
-            imgs, q_gt, _ = batch
-            object_ids = None
-
+        imgs, depth_masks, q_gt, object_ids = batch
         imgs = imgs.to(device, non_blocking=True).float()
+        depth_masks = depth_masks.to(device, non_blocking=True).float()
         q_gt = q_gt.to(device, non_blocking=True).float()
-        
-        q_pred = model(imgs, object_ids) if use_object_id else model(imgs, None)
-
+        object_ids = object_ids.to(device, non_blocking=True)
+        q_pred = model(imgs, depth_masks, object_ids)
         loss_rot = quat_geodesic_loss(q_pred, q_gt)
-
         bs = imgs.size(0)
         ang_deg = quat_angle_error_deg(q_pred, q_gt)
-
         total_rot_loss += loss_rot.item() * bs
         total_ang += ang_deg * bs
         n += bs
@@ -150,13 +131,15 @@ def main():
         root_dir=args.dataset_path,
         object_id=args.object_id if args.object_id != 0 else None,
         split="train",
-        split_percentage=args.split_percentage
+        split_percentage=args.split_percentage,
+        return_depth=True
     )
     val_ds = LineModRotationDataset(
         root_dir=args.dataset_path,
         object_id=args.object_id if args.object_id != 0 else None,
         split="val",
-        split_percentage=args.split_percentage
+        split_percentage=args.split_percentage,
+        return_depth=True
     )
 
     train_loader = DataLoader(
@@ -176,16 +159,14 @@ def main():
         drop_last=False
     )
 
-    use_object_id = args.use_object_id
-    if use_object_id:
-        print("Using ResNetRotationWithObjectID (object identity conditioning enabled)")
-        model = ResNetRotationWithObjectID(
-            num_objects=NUM_OBJECTS,
-            freeze_backbone=args.freeze_backbone
-        ).to(device)
-    else:
-        print("Using ResNetRotation (single object or no conditioning)")
-        model = ResNetRotation(freeze_backbone=args.freeze_backbone).to(device)
+    print("Using ResNetRotationRGBD (RGB + depth fusion, always with object id)")
+    model = ResNetRotationRGBD(
+        depth_feat_dim=256,
+        num_objects=NUM_OBJECTS,
+        use_object_id=True,
+        freeze_backbone=args.freeze_backbone,
+    ).to(device)
+
 
     resumed_epoch = 0
     if args.resume:
@@ -250,8 +231,8 @@ def main():
                 drop_last=False
             )
 
-        tr_ang, tr_rot = train_one_epoch(model, train_loader, optimizer, device, use_object_id)
-        va_ang, va_rot = eval_one_epoch(model, val_loader, device, use_object_id)
+        tr_ang, tr_rot = train_one_epoch(model, train_loader, optimizer, device)
+        va_ang, va_rot = eval_one_epoch(model, val_loader, device)
 
         scheduler.step(va_ang)
         current_lr = optimizer.param_groups[0]['lr']
@@ -265,7 +246,7 @@ def main():
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "object_id": args.object_id,
-            "use_object_id": use_object_id,
+            "use_object_id": True,
             "args": vars(args),
         }, last_path)
 
@@ -277,7 +258,7 @@ def main():
                 "optimizer_state": optimizer.state_dict(),
                 "best_val_ang_deg": best_val_ang,
                 "object_id": args.object_id,
-                "use_object_id": use_object_id,
+                "use_object_id": True,
                 "args": vars(args),
             }, best_path)
             print(f"  [OK] New best saved: {best_path} (val ang {best_val_ang:.2f} deg)")
@@ -290,7 +271,7 @@ def main():
                 "optimizer_state": optimizer.state_dict(),
                 "val_ang_deg": va_ang,
                 "object_id": args.object_id,
-                "use_object_id": use_object_id,
+                "use_object_id": True,
                 "args": vars(args),
             }, epoch_path)
             print(f"  [OK] Checkpoint saved: {epoch_path}")
