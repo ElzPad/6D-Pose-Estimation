@@ -124,7 +124,7 @@ class LineModTranslationPredictionTransform(object):
 
         if self.is_train:
             self.augment = transforms.Compose([
-                transforms.RandomHorizontalFlip(p=0.5),
+                # transforms.RandomHorizontalFlip(p=0.5),
                 transforms.ColorJitter(
                     brightness=0.08,
                     contrast=0.08,
@@ -188,7 +188,7 @@ class LineModRGBDTranslationTransform(object):
 
         if self.is_train:
             self.augment = transforms.Compose([
-                transforms.RandomHorizontalFlip(p=0.5),
+                # transforms.RandomHorizontalFlip(p=0.5),
                 transforms.ColorJitter(
                     brightness=0.08,
                     contrast=0.08,
