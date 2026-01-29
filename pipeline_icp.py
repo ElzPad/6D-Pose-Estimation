@@ -26,19 +26,19 @@ from metrics.add import compute_add, compute_add_s
 
 # Mapping: YOLO Class ID (0-12) -> LINEMOD Object ID (1-15)
 YOLO_TO_LINEMOD_ID = {
-    0: 1,
-    1: 2,
-    2: 4,
-    3: 5,
-    4: 6,
-    5: 8,
-    6: 9,
-    7: 10,
-    8: 11,
-    9: 12,
-    10: 13,
-    11: 14,
-    12: 15,
+    0: 1,  # ape
+    1: 2,  # benchvise
+    2: 4,  # camera
+    3: 5,  # can
+    4: 6,  # cat
+    5: 8,  # driller
+    6: 9,  # duck
+    7: 10,  # eggbox
+    8: 11,  # glue
+    9: 12,  # holepuncher
+    10: 13,  # iron
+    11: 14,  # lamp
+    12: 15,  # phone
 }
 
 LINEMOD_ID_TO_YOLO = {v: k for k, v in YOLO_TO_LINEMOD_ID.items()}
@@ -165,6 +165,7 @@ def draw_bbox_rgb(img_rgb, bbox_xywh, label=None, thickness=2):
 
     return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
 
+
 def project_points(K, pts_cam):
     """
     Project Nx3 camera-frame points into pixels using intrinsics K (3x3).
@@ -245,6 +246,7 @@ def draw_pose_axes_rgb(img_rgb, K, R_pred, t_pred, axis_len, thickness=1):
 
     return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
 
+
 def rotation_error_degrees(R_pred: torch.Tensor, R_gt: torch.Tensor) -> float:
     """
     Angular distance between two rotation matrices in degrees.
@@ -254,7 +256,10 @@ def rotation_error_degrees(R_pred: torch.Tensor, R_gt: torch.Tensor) -> float:
     cos_theta = torch.clamp((tr - 1.0) / 2.0, -1.0, 1.0)
     return float(torch.acos(cos_theta).item() * 180.0 / np.pi)
 
-def crop_resize_rgbd_infer(image_raw, depth_raw, bbox, image_size=224, depth_unit_scale=1000.0, depth_clip_m=2.0, bbox_pad=1.2):
+
+def crop_resize_rgbd_infer(
+    image_raw, depth_raw, bbox, image_size=224, depth_unit_scale=1000.0, depth_clip_m=2.0, bbox_pad=1.2
+):
     """Crop and resize RGB and depth to padded bbox, normalize as in training."""
     img_h, img_w = image_raw.shape[:2]
     cx, cy, bw, bh = bbox
@@ -293,31 +298,31 @@ def crop_resize_rgbd_infer(image_raw, depth_raw, bbox, image_size=224, depth_uni
 def depth_to_pointcloud(depth_img, K, bbox=None, depth_scale=1.0):
     """
     Back-project depth image to 3D point cloud in camera frame.
-    
+
     Args:
         depth_img: (H, W) uint16 depth in mm
         K: (3, 3) camera intrinsics
         bbox: Optional (cx, cy, w, h) to extract points only inside bbox
         depth_scale: Scale factor (1.0 = mm, 0.001 = m)
-    
+
     Returns:
         points: (N, 3) numpy array of 3D points in camera frame
     """
     if isinstance(K, torch.Tensor):
         K = K.numpy()
-    
+
     # Fix: squeeze singleton channel if present
     if depth_img.ndim == 3 and depth_img.shape[2] == 1:
         depth_img = depth_img[:, :, 0]
 
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
-    
+
     H, W = depth_img.shape
-    
+
     # Create mask for valid depth
     valid_mask = depth_img > 0
-    
+
     # If bbox provided, mask to only use points inside bbox
     if bbox is not None:
         bcx, bcy, bw, bh = bbox
@@ -325,28 +330,27 @@ def depth_to_pointcloud(depth_img, K, bbox=None, depth_scale=1.0):
         y1 = int(max(0, bcy - bh / 2))
         x2 = int(min(W, bcx + bw / 2))
         y2 = int(min(H, bcy + bh / 2))
-        
+
         bbox_mask = np.zeros((H, W), dtype=bool)
         bbox_mask[y1:y2, x1:x2] = True
         valid_mask = valid_mask & bbox_mask
-    
+
     # Get valid pixel coordinates
     v, u = np.where(valid_mask)
     z = depth_img[v, u].astype(np.float32) * depth_scale
-    
+
     # Back-project to 3D
     x = (u - cx) * z / fx
     y = (v - cy) * z / fy
-    
+
     points = np.stack([x, y, z], axis=1)
     return points
 
 
-def refine_pose_icp(R_pred, t_pred, depth_img, K, model_pts, bbox=None,
-                    max_iterations=50, threshold=5.0):
+def refine_pose_icp(R_pred, t_pred, depth_img, K, model_pts, bbox=None, max_iterations=50, threshold=5.0):
     """
     Refine predicted pose using ICP between observed depth and CAD model.
-    
+
     Args:
         R_pred: (3, 3) predicted rotation matrix (torch or numpy)
         t_pred: (3, 1) predicted translation (torch or numpy), in mm
@@ -356,13 +360,13 @@ def refine_pose_icp(R_pred, t_pred, depth_img, K, model_pts, bbox=None,
         bbox: (cx, cy, w, h) bounding box to extract observed points
         max_iterations: Maximum ICP iterations
         threshold: Distance threshold in mm for ICP correspondences
-    
+
     Returns:
         R_refined: (3, 3) numpy rotation matrix
         t_refined: (3, 1) numpy translation vector
         success: bool indicating if ICP converged
     """
-    
+
     # Convert inputs to numpy
     if isinstance(R_pred, torch.Tensor):
         R_pred = R_pred.cpu().numpy()
@@ -370,49 +374,49 @@ def refine_pose_icp(R_pred, t_pred, depth_img, K, model_pts, bbox=None,
         t_pred = t_pred.cpu().numpy().reshape(3, 1)
     if isinstance(model_pts, torch.Tensor):
         model_pts = model_pts.cpu().numpy()
-    
+
     # Extract observed point cloud from depth
     observed_pts = depth_to_pointcloud(depth_img, K, bbox=bbox, depth_scale=1.0)  # mm
-    
+
     if len(observed_pts) < 50:
         # Not enough points for reliable ICP
         return R_pred, t_pred, False
-    
+
     # Transform model points to camera frame using initial pose
     model_pts_cam = (R_pred @ model_pts.T + t_pred).T  # (N, 3)
-    
+
     # Create Open3D point clouds
     source_pcd = o3d.geometry.PointCloud()
     source_pcd.points = o3d.utility.Vector3dVector(model_pts_cam)
-    
+
     target_pcd = o3d.geometry.PointCloud()
     target_pcd.points = o3d.utility.Vector3dVector(observed_pts)
-    
+
     # Run ICP (point-to-point)
     # Initial transformation is identity since we already transformed model to camera frame
     init_transform = np.eye(4)
-    
+
     reg_result = o3d.pipelines.registration.registration_icp(
         source_pcd,
         target_pcd,
         threshold,
         init_transform,
         o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iterations)
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iterations),
     )
-    
+
     # Extract refined transformation
     T_refine = reg_result.transformation
     R_refine = T_refine[:3, :3]
     t_refine = T_refine[:3, 3:4]
-    
+
     # Compose with initial pose: R_final = R_refine @ R_pred, t_final = R_refine @ t_pred + t_refine
     R_refined = R_refine @ R_pred
     t_refined = R_refine @ t_pred + t_refine
-    
+
     # Check if ICP converged reasonably
     success = reg_result.fitness > 0.3  # At least 30% inlier correspondences
-    
+
     return R_refined, t_refined, success
 
 
@@ -449,7 +453,6 @@ def run_inference(
     resnet_rotation_model.eval()
     resnet_translation_rgbd_model.eval()
     print(f"Running inference on {len(dataloader.dataset)} images...")
-
 
     for batch in tqdm(dataloader):
         batch_images, batch_depths, batch_targets = batch
@@ -533,9 +536,14 @@ def run_inference(
         if gt_id in meshes_numpy:
             model_pts_np = meshes_numpy[gt_id]
             R_refined, t_refined, icp_success = refine_pose_icp(
-                R_pred, t_pred_tensor, depth_np, target["intrinsics"],
-                model_pts_np, bbox=pred_bbox,
-                max_iterations=icp_max_iter, threshold=icp_threshold
+                R_pred,
+                t_pred_tensor,
+                depth_np,
+                target["intrinsics"],
+                model_pts_np,
+                bbox=pred_bbox,
+                max_iterations=icp_max_iter,
+                threshold=icp_threshold,
             )
             if icp_success:
                 R_pred = torch.from_numpy(R_refined.astype(np.float32)).to(device)
@@ -646,7 +654,7 @@ def main():
 
     resnet_rotation_model = load_resnet_rotation_rgbd(args.resnet_rot_weights, device)
     resnet_translation_rgbd_model = load_resnet_translation(args.resnet_tra_weights, device)
-    
+
     all_poses = run_inference(
         dataloader,
         yolo_model,
@@ -659,7 +667,7 @@ def main():
         save_images=args.save_images,
         results_dir=args.results_dir,
         icp_max_iter=args.icp_max_iter,
-        icp_threshold=args.icp_threshold
+        icp_threshold=args.icp_threshold,
     )
 
     print(f"Done. Processed {len(all_poses)} poses.")
