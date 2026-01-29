@@ -1,13 +1,12 @@
-# 6D Pose Estimation
+# 6D Object Pose Estimation: Accurate RGB-D Multi-modal Optimization and Refinement
 
-6D pose estimation framework for LINEMOD dataset using YOLO detection + ResNet rotation/translation + optional ICP refinement.
+ARMOR - 6D pose estimation framework for LINEMOD dataset using YOLO detection, ResNet rotation/translation and ICP refinement.
 
 ## Pipelines
 
 - **RGB**: YOLO → ResNet (Rotation/Translation)
 - **RGBD**: YOLO → ResNet RGBD (Rotation/Translation)
 - **ICP**: RGBD → Point Cloud Registration Refinement
-- **Depth Direct**: Depth-only estimation
 
 Supports 13 LINEMOD objects with ADD/ADD-S metrics (symmetric handling).
 
@@ -167,9 +166,9 @@ Results saved in JSON format. Metrics computed in results/ directory.
 
 If using this code, cite:
 ```bibtex
-@software{6d_pose_estimation_2024,
-  title={6D Pose Estimation Framework for LINEMOD Dataset},
-  author={Author Name},
+@software{ARMOR,
+  title={6D Object Pose Estimation: Accurate RGB-D Multi-modal Optimization and Refinement},
+  author={Paduano, Elziario and Pavanati, Marco and Qureshi, Sadaf and Zeqaj, Klejsi},
   year={2024}
 }
 ```
@@ -181,4 +180,5 @@ See LICENSE file for details.
 - LINEMOD dataset
 - Ultralytics (YOLO)
 - Open3D (point cloud processing)
+
 - PyTorch & torchvision
