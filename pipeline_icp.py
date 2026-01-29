@@ -14,13 +14,13 @@ from ultralytics import YOLO
 from geometry.pinhole_camera_model import pinhole_translation
 from geometry.quaternion_to_rotation_matrix import quaternion_to_matrix
 
-# Use dataset with depth for ICP refinement
+# from dataset.linemod_inference_dataset import LinemodInferenceDataset, collate_fn
 from dataset.linemod_inference_dataset_with_depth import LinemodInferenceDataset, collate_fn
 from torch.utils.data import DataLoader
-from augmentations import get_val_transforms, get_val_translation_transforms
+from augmentations import get_val_transforms, get_val_translation_transforms, get_val_rgbd_translation_transforms
 from models.yolo.load import load_yolo
-from models.rgb.resnetRotation.load import load_resnet_rotation
-from models.rgb.resnetTranslation.load import load_resnet_translation
+from models.rgbd.resnetRotationRGBD.load import load_resnet_rotation_rgbd
+from models.rgbd.resnetTranslationRGBD.load import load_resnet_translation
 
 from metrics.add import compute_add, compute_add_s
 
@@ -47,7 +47,7 @@ SYMMETRIC_IDS = [10, 11]
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="6D Pose Estimation Inference Pipeline with ICP Refinement")
+    parser = argparse.ArgumentParser(description="6D Pose Estimation Inference Pipeline")
 
     parser.add_argument("--dataset_root", type=str, default="data/linemod_yolo")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"])
@@ -55,7 +55,7 @@ def get_args():
     parser.add_argument(
         "--models_dir",
         type=str,
-        default="data/linemod/Linemod_preprocessed/models",
+        default="data/linemod_yolo/models",
         help="Path to directory containing .ply files",
     )
 
@@ -66,7 +66,6 @@ def get_args():
     parser.add_argument("--output_file", type=str, default="results.json")
 
     # ICP refinement options
-    parser.add_argument("--use_icp", action="store_true", help="Enable ICP pose refinement using depth")
     parser.add_argument("--icp_max_iter", type=int, default=50, help="Maximum ICP iterations")
     parser.add_argument("--icp_threshold", type=float, default=5.0, help="ICP distance threshold in mm")
 
@@ -166,7 +165,6 @@ def draw_bbox_rgb(img_rgb, bbox_xywh, label=None, thickness=2):
 
     return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
 
-
 def project_points(K, pts_cam):
     """
     Project Nx3 camera-frame points into pixels using intrinsics K (3x3).
@@ -247,7 +245,6 @@ def draw_pose_axes_rgb(img_rgb, K, R_pred, t_pred, axis_len, thickness=1):
 
     return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
 
-
 def rotation_error_degrees(R_pred: torch.Tensor, R_gt: torch.Tensor) -> float:
     """
     Angular distance between two rotation matrices in degrees.
@@ -256,6 +253,41 @@ def rotation_error_degrees(R_pred: torch.Tensor, R_gt: torch.Tensor) -> float:
     tr = torch.clamp(torch.trace(R_diff), -1.0, 3.0)
     cos_theta = torch.clamp((tr - 1.0) / 2.0, -1.0, 1.0)
     return float(torch.acos(cos_theta).item() * 180.0 / np.pi)
+
+def crop_resize_rgbd_infer(image_raw, depth_raw, bbox, image_size=224, depth_unit_scale=1000.0, depth_clip_m=2.0, bbox_pad=1.2):
+    """Crop and resize RGB and depth to padded bbox, normalize as in training."""
+    img_h, img_w = image_raw.shape[:2]
+    cx, cy, bw, bh = bbox
+    # Apply padding as in training
+    bw = bw * bbox_pad
+    bh = bh * bbox_pad
+    x1 = int(round(cx - bw / 2.0))
+    y1 = int(round(cy - bh / 2.0))
+    x2 = int(round(cx + bw / 2.0))
+    y2 = int(round(cy + bh / 2.0))
+    x1 = max(0, min(x1, img_w - 1))
+    y1 = max(0, min(y1, img_h - 1))
+    x2 = max(1, min(x2, img_w))
+    y2 = max(1, min(y2, img_h))
+    if x2 <= x1 or y2 <= y1:
+        x1, y1, x2, y2 = 0, 0, img_w, img_h
+    rgb = image_raw[y1:y2, x1:x2]
+    depth = depth_raw[y1:y2, x1:x2]
+    rgb = cv2.resize(rgb, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
+    depth = cv2.resize(depth, (image_size, image_size), interpolation=cv2.INTER_NEAREST)
+    rgb = rgb.astype(np.float32) / 255.0
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    rgb = (rgb - mean) / std
+    rgb_tensor = torch.from_numpy(rgb).permute(2, 0, 1).contiguous()
+    depth = depth.astype(np.float32)
+    if depth_unit_scale > 0:
+        depth = depth / depth_unit_scale
+    valid = (depth > 0).astype(np.float32)
+    depth = np.clip(depth, 0.0, depth_clip_m)
+    depth_norm = (depth / depth_clip_m) * valid
+    depth_tensor = torch.from_numpy(depth_norm).unsqueeze(0).contiguous()
+    return rgb_tensor, depth_tensor
 
 
 def depth_to_pointcloud(depth_img, K, bbox=None, depth_scale=1.0):
@@ -388,19 +420,19 @@ def run_inference(
     dataloader,
     yolo_model,
     resnet_rotation_model,
-    resnet_translation_model,
+    resnet_translation_rgbd_model,
     diameters,
     meshes,
     meshes_numpy,
     device,
     save_images=False,
     results_dir="results_images",
-    use_icp=False,
     icp_max_iter=50,
     icp_threshold=5.0,
 ):
     transformer = get_val_transforms(image_size=224)
-    translation_transformer = get_val_translation_transforms(image_size=224)
+    rgbd_transformer = get_val_rgbd_translation_transforms(image_size=224)
+
     results = []
     pass_count = 0
     total_count = 0
@@ -412,20 +444,17 @@ def run_inference(
     use_object_id = getattr(resnet_rotation_model, "use_object_id", False)
     if use_object_id:
         print("ResNet using object identity conditioning")
-    
-    if use_icp:
-        print("ICP refinement ENABLED")
-        
+
     yolo_model.eval()
     resnet_rotation_model.eval()
-    resnet_translation_model.eval()
+    resnet_translation_rgbd_model.eval()
     print(f"Running inference on {len(dataloader.dataset)} images...")
 
-    for batch_images, batch_depths, batch_targets in tqdm(dataloader):
+
+    for batch in tqdm(dataloader):
+        batch_images, batch_depths, batch_targets = batch
         target = batch_targets[0]
         filename = target["image_id"]
-        depth_tensor = batch_depths[0]  # (H, W) uint16 depth in mm
-        depth_img = depth_tensor.numpy() if isinstance(depth_tensor, torch.Tensor) else depth_tensor
 
         K = target["intrinsics"].numpy()
         gt_id = int(target["gt_class_id"])
@@ -456,69 +485,55 @@ def run_inference(
         pred_conf = float(confs[best_idx])
 
         img_tensor = batch_images[0]
+        depth_tensor = batch_depths[0]
         img_np = (img_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)  # RGB
+        depth_np = depth_tensor.numpy()
+        # Fix: squeeze singleton channel if present (could be (1, H, W) or (H, W, 1))
+        if depth_np.ndim == 3:
+            if depth_np.shape[0] == 1:
+                depth_np = depth_np[0]
+            elif depth_np.shape[2] == 1:
+                depth_np = depth_np[:, :, 0]
 
-        # 2) Rotation
-        patch = transformer(img_np, pred_bbox).to(device)
+        # For rotation: crop and preprocess as in training
+        rgb_patch, depth_patch = crop_resize_rgbd_infer(
+            img_np, depth_np, pred_bbox, image_size=224, depth_unit_scale=1000.0, depth_clip_m=2.0, bbox_pad=1.2
+        )
+        rgb_patch = rgb_patch.unsqueeze(0).to(device)
+        depth_patch = depth_patch.unsqueeze(0).to(device)
         with torch.no_grad():
             if use_object_id:
                 object_ids = torch.tensor([gt_id], device=device)
-                q_pred = resnet_rotation_model(patch.unsqueeze(0), object_ids)
+                q_pred = resnet_rotation_model(rgb_patch, depth_patch, object_ids)
             else:
-                q_pred = resnet_rotation_model(patch.unsqueeze(0), None)
+                q_pred = resnet_rotation_model(rgb_patch, depth_patch, None)
 
         q_pred = q_pred[0] if q_pred.ndim == 2 else q_pred
         q_pred = q_pred / torch.norm(q_pred)
         R_pred = quaternion_to_matrix(q_pred).squeeze(0)
 
-        """
-        # 3) Translation (pinhole)
+        # 3) Translation (RGBD)
+        # Recreate the full-image RGBD tensor for translation
+        rgbd_tensor = rgbd_transformer(img_np, depth_np).to(device)
         obj_diameter = diameters.get(gt_id, 0.1)
-        f_x, f_y = K[0, 0], K[1, 1]
-        c_x, c_y = K[0, 2], K[1, 2]
-        pinhole_X, pinhole_Y, pinhole_Z = pinhole_translation(
-            pred_bbox, f_x, f_y, c_x, c_y, obj_diameter
-        )
-
-        t_pred_np = np.array([pinhole_X, pinhole_Y, pinhole_Z])
-        t_pred_tensor = torch.from_numpy(t_pred_np).float().to(device).view(3, 1)
-        """
-        # 3) Translation (resnet)
-        obj_diameter = diameters.get(gt_id, 0.1)
-
-        # pred_bbox is (cx, cy, w, h) in pixels
-        img_h, img_w = img_np.shape[:2]  # or get from original frame, same thing here
+        img_h, img_w = img_np.shape[:2]
         cx, cy, bw, bh = pred_bbox
         pred_bbox_norm = np.array([cx / img_w, cy / img_h, bw / img_w, bh / img_h], dtype=np.float32)
         bbox_tensor = torch.tensor(pred_bbox_norm, dtype=torch.float32, device=device).unsqueeze(0)
-
         diameter_tensor = torch.tensor([obj_diameter], dtype=torch.float32, device=device)
-        full_img = translation_transformer(img_np).to(device)
         with torch.no_grad():
-            t_pred = resnet_translation_model(
-                full_img.unsqueeze(0), torch.tensor([gt_id], device=device), bbox_tensor, diameter_tensor
+            t_pred = resnet_translation_rgbd_model(
+                rgbd_tensor.unsqueeze(0), torch.tensor([gt_id], device=device), bbox_tensor, diameter_tensor
             )
-
-        # Use predicted depth and estimate x and y using pinhole camera model
-        # f_x, f_y = K[0, 0], K[1, 1]
-        # c_x, c_y = K[0, 2], K[1, 2]
-        # pinhole_X, pinhole_Y, pinhole_Z = pinhole_translation(
-        #     pred_bbox, f_x, f_y, c_x, c_y, obj_diameter, precomputed_depth=t_pred[0].cpu().numpy()[2] * 1000
-        # )
-        #
-        # t_pred_np = np.array([pinhole_X, pinhole_Y, pinhole_Z])
-        # t_pred_tensor = torch.from_numpy(t_pred_np).float().to(device).view(3, 1)
-        # or
-        # Use the predicted (x,y,z) coordinates
         t_pred_np = t_pred[0].cpu().numpy() * 1000
         t_pred_tensor = t_pred[0].view(3, 1).to(device) * 1000
 
-        # 4) ICP Refinement (optional)
+        # 4) ICP Refinement
         icp_applied = False
-        if use_icp and gt_id in meshes_numpy:
+        if gt_id in meshes_numpy:
             model_pts_np = meshes_numpy[gt_id]
             R_refined, t_refined, icp_success = refine_pose_icp(
-                R_pred, t_pred_tensor, depth_img, target["intrinsics"],
+                R_pred, t_pred_tensor, depth_np, target["intrinsics"],
                 model_pts_np, bbox=pred_bbox,
                 max_iterations=icp_max_iter, threshold=icp_threshold
             )
@@ -575,7 +590,6 @@ def run_inference(
         trace = torch.clamp(R_diff.trace(), -1.0, 3.0)
         r_error = torch.acos((trace - 1) / 2).item() * 180 / np.pi
 
-        # IMPORTANT: results.json structure kept as in your original paste
         results.append(
             {
                 "file": filename,
@@ -594,8 +608,7 @@ def run_inference(
         print("\n" + "=" * 30)
         print(f"Total Evaluated: {total_count}")
         print(f"Accuracy (ADD < 0.1d): {100 * pass_count / total_count:.2f}%")
-        if use_icp:
-            print(f"ICP successful refinements: {icp_success_count}/{total_count}")
+        print(f"ICP successful refinements: {icp_success_count}/{total_count}")
         print("=" * 30)
 
     return results
@@ -608,7 +621,7 @@ def main():
     print("Loading data...")
     diameters = load_diameters(args.models_info)
     meshes = load_meshes(args.models_dir)
-    
+
     # Also create numpy version of meshes for ICP
     meshes_numpy = {k: v.numpy() for k, v in meshes.items()}
 
@@ -631,23 +644,22 @@ def main():
     if hasattr(yolo_model, "to"):
         yolo_model.to(device)
 
-    resnet_rotation_model = load_resnet_rotation(args.resnet_rot_weights, device)
-    resnet_translation_model = load_resnet_translation(args.resnet_tra_weights, device)
-
+    resnet_rotation_model = load_resnet_rotation_rgbd(args.resnet_rot_weights, device)
+    resnet_translation_rgbd_model = load_resnet_translation(args.resnet_tra_weights, device)
+    
     all_poses = run_inference(
         dataloader,
         yolo_model,
         resnet_rotation_model,
-        resnet_translation_model,
+        resnet_translation_rgbd_model,
         diameters,
         meshes,
         meshes_numpy,
         device,
         save_images=args.save_images,
         results_dir=args.results_dir,
-        use_icp=args.use_icp,
         icp_max_iter=args.icp_max_iter,
-        icp_threshold=args.icp_threshold,
+        icp_threshold=args.icp_threshold
     )
 
     print(f"Done. Processed {len(all_poses)} poses.")
