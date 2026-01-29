@@ -21,8 +21,8 @@ def parse_args():
     p.add_argument("--split_percentage", type=float, default=0.8,
                    help="Fraction used for train in your dataset implementation.")
     p.add_argument("--num_workers", type=int, default=0)
-    p.add_argument("--save_dir", type=str, default="runs_resnet")
-    p.add_argument("--run_name", type=str, default="resnet50_tra")
+    p.add_argument("--save_dir", type=str, default="runs")
+    p.add_argument("--run_name", type=str, default="resnet_translation_rgb")
     p.add_argument("--freeze_backbone", action="store_true",
                    help="If set, freeze all ResNet layers except the final FC head.")
     p.add_argument("--unfreeze_epoch", type=int, default=30,

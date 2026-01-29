@@ -53,7 +53,6 @@ class LineModRotationPredictionTransform(object):
         x1, y1 = x_center - w_box/2, y_center - h_box/2
         x2, y2 = x_center + w_box/2, y_center + h_box/2
         
-        # --- The rest of your logic remains the same, but using correct w_box ---
         pad_x = int(w_box * self.padding_factor)
         pad_y = int(h_box * self.padding_factor)
         

@@ -11,59 +11,6 @@ NUM_OBJECTS = len(LINEMOD_OBJECT_IDS)
 # Create mapping from object_id to one-hot index
 OBJECT_ID_TO_INDEX = {obj_id: idx for idx, obj_id in enumerate(LINEMOD_OBJECT_IDS)}
 
-def adapt_conv1_for_rgbd(conv1: nn.Conv2d, init_method: str = "avg") -> nn.Conv2d:
-    """
-    Adapt a 3-channel conv1 layer to accept 4 channels (RGBD).
-    
-    Args:
-        conv1: Original conv1 layer with 3 input channels
-        init_method: How to initialize the depth channel weights:
-            - "avg": Average of RGB weights (recommended - depth often correlates with luminance)
-            - "zero": Zero initialization (depth starts with no contribution)
-            - "green": Copy green channel weights (green ≈ luminance in human vision)
-            - "scaled_avg": Average of RGB weights scaled by 0.5 (conservative start)
-    
-    Returns:
-        New conv1 layer with 4 input channels
-    """
-    # Create new conv layer with 4 input channels
-    new_conv1 = nn.Conv2d(
-        in_channels=4,
-        out_channels=conv1.out_channels,
-        kernel_size=conv1.kernel_size,
-        stride=conv1.stride,
-        padding=conv1.padding,
-        bias=conv1.bias is not None
-    )
-    
-    with torch.no_grad():
-        # Copy RGB weights (out_channels, 3, kH, kW) -> (out_channels, 3, kH, kW)
-        new_conv1.weight[:, :3, :, :] = conv1.weight.clone()
-        
-        # Initialize depth channel weights based on method
-        if init_method == "avg":
-            # Average of RGB channels - good default since depth correlates with scene structure
-            depth_weights = conv1.weight.mean(dim=1, keepdim=True)
-        elif init_method == "zero":
-            # Zero init - depth has no initial contribution, learned from scratch
-            depth_weights = torch.zeros_like(conv1.weight[:, :1, :, :])
-        elif init_method == "green":
-            # Copy green channel - often captures luminance-like information
-            depth_weights = conv1.weight[:, 1:2, :, :].clone()
-        elif init_method == "scaled_avg":
-            # Scaled average - conservative initialization
-            depth_weights = conv1.weight.mean(dim=1, keepdim=True) * 0.5
-        else:
-            raise ValueError(f"Unknown init_method: {init_method}")
-        
-        new_conv1.weight[:, 3:4, :, :] = depth_weights
-        
-        # Copy bias if present
-        if conv1.bias is not None:
-            new_conv1.bias = nn.Parameter(conv1.bias.clone())
-    
-    return new_conv1
-
 class ResNetTranslationRGBD(nn.Module):
     """
     ResNet-50 backbone (ImageNet) for RGB + DepthCNN for depth + object identity conditioning + bbox + diameter for translation regression.
@@ -129,15 +76,13 @@ class ResNetTranslationRGBD(nn.Module):
         if freeze_backbone:
             for name, p in self.rgb_backbone.named_parameters():
                 p.requires_grad = False
-            for name, p in self.depth_cnn.named_parameters():
-                p.requires_grad = False
+            # NOTE: We do NOT freeze depth_cnn because it's randomly initialized (not pretrained).
+            # Freezing it would result in random, useless depth features.
 
     def unfreeze_backbone(self):
         for p in self.rgb_backbone.parameters():
             p.requires_grad = True
-        for p in self.depth_cnn.parameters():
-            p.requires_grad = True
-        print("[INFO] Backbones unfrozen - all parameters now trainable")
+        print("[INFO] RGB backbone unfrozen - all parameters now trainable")
 
     def forward(self, x, object_ids, bbox, diameter):
         """

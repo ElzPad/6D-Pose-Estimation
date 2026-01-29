@@ -12,4 +12,3 @@ torchvision
 tqdm
 trimesh
 ultralytics
-# open3d

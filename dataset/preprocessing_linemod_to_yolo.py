@@ -266,10 +266,19 @@ def process_dataset(dataset_root, output_dir, training_ratio=0.8, seed=42, clean
     dst_models_path = os.path.join(output_dir, 'models')
     models_info_path = os.path.join(model_path, 'models_info.yml')
     shutil.copy(models_info_path, dst_models_path)
-    
+
+    # Copy 3D object models (obj_01.ply to obj_15.ply)
+    for obj_id in range(1, 16):
+        src_model = os.path.join(model_path, f"obj_{obj_id:02d}.ply")
+        dst_model = os.path.join(dst_models_path, f"obj_{obj_id:02d}.ply")
+        if os.path.exists(src_model):
+            shutil.copy(src_model, dst_model)
+        else:
+            print(f"WARNING: Model file {src_model} not found.")
+
     write_data_yaml(output_dir)
 
-    print(f"\Done! Dataset generated in '{output_dir}'.")
+    print(f"\nDone! Dataset generated in '{output_dir}'.")
     print(f"All {total_images} images are in 'images/train'.")
 
 def main():

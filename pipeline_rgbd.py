@@ -58,9 +58,9 @@ def get_args():
         help="Path to directory containing .ply files",
     )
 
-    parser.add_argument("--yolo_weights", type=str, required=True)
-    parser.add_argument("--resnet_rot_weights", type=str, required=True)
-    parser.add_argument("--resnet_tra_weights", type=str, required=True)
+    parser.add_argument("--yolo_weights", type=str, default="checkpoints/yolo/weights/yolo_model.pt")
+    parser.add_argument("--resnet_rot_weights", type=str, default="checkpoints/rgbd/resnetRotationRGBD/rotation_rgbd_model.pth")
+    parser.add_argument("--resnet_tra_weights", type=str, default="checkpoints/rgbd/resnetTranslationRGBD/translation_rgbd_model.pth")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_file", type=str, default="results.json")
 
@@ -431,14 +431,13 @@ def run_inference(
             pass_count += 1
         total_count += 1
 
-        # Compute separate translation and rotation errors (unchanged from your original)
+        # Compute separate translation and rotation errors
         t_error = torch.norm(t_pred_tensor - gt_t).item()
 
         R_diff = R_pred @ gt_R.T
         trace = torch.clamp(R_diff.trace(), -1.0, 3.0)
         r_error = torch.acos((trace - 1) / 2).item() * 180 / np.pi
 
-        # IMPORTANT: results.json structure kept as in your original paste
         results.append(
             {
                 "file": filename,
