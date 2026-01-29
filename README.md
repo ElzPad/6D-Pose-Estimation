@@ -51,6 +51,9 @@ pip install -r requirements.txt
 # Download dataset
 python utils/download_linemod.py
 
+# Download weights
+python utils/download_weights.py
+
 # Preprocess for YOLO
 python dataset/preprocessing_linemod_to_yolo.py \
     --linemod_root data/linemod/Linemod_preprocessed \
