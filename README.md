@@ -29,7 +29,7 @@ Supports 13 LINEMOD objects with ADD/ADD-S metrics (symmetric handling).
 │       └── resnetTranslationRGBD/# RGBD translation
 ├── scripts/                      # Validation utilities
 ├── utils/                        # Metrics, downloads, CAD loading
-├── checkpoints/yolo/             # Pretrained YOLO weights
+├── checkpoints/                  # Trained models' weights
 └── results/                      # Evaluation outputs
 ```
 
@@ -46,6 +46,14 @@ Core: torch, torchvision, ultralytics (YOLO), opencv-python, open3d, trimesh, Py
 ```bash
 # Clone & install
 git clone <repo> && cd 6D-Pose-Estimation-main
+```
+
+```bash
+# (optional) Create a virtual environment
+python -m venv .venv
+.venv/Scripts/activate # on Windows
+
+# Install requirements
 pip install -r requirements.txt
 
 # Download dataset
@@ -55,9 +63,7 @@ python utils/download_linemod.py
 python utils/download_weights.py
 
 # Preprocess for YOLO
-python dataset/preprocessing_linemod_to_yolo.py \
-    --linemod_root data/linemod/Linemod_preprocessed \
-    --output_dir data/linemod_yolo
+python dataset/preprocessing_linemod_to_yolo.py
 ```
 
 ## Training
@@ -67,16 +73,34 @@ python dataset/preprocessing_linemod_to_yolo.py \
 python models/yolo/train.py --dataset_yaml data/linemod_yolo/data.yml --epochs 50 --batch 16
 
 # RGB Rotation
-python models/rgb/resnetRotation/train.py --dataset_path data/linemod_yolo --epochs 30 --batch 64 --freeze_backbone
+python -m models.rgb.resnetRotation.train --dataset_path data/linemod_yolo \
+    --object_id 0 \
+    --epochs 30 --batch 64 --lr 1e-3 \
+    --freeze_backbone --unfreeze_epoch 30
 
 # RGB Translation  
-python models/rgb/resnetTranslation/train.py --dataset_path data/linemod_yolo --epochs 30 --batch 64
+python -m models.rgb.resnetTranslation.train --dataset_path data/linemod_yolo --epochs 30 --batch 64
 
 # RGBD Rotation
-python models/rgbd/resnetRotationRGBD/train.py --dataset_path data/linemod_yolo --epochs 30 --batch 64
+python -m models.rgbd.resnetRotationRGBD.train --dataset_path data/linemod_yolo --epochs 30 --batch 64
 
 # RGBD Translation
-python models/rgbd/resnetTranslationRGBD/train.py --dataset_path data/linemod_yolo --epochs 30 --batch 64
+python -m models.rgbd.resnetTranslationRGBD.train --dataset_path data/linemod_yolo --epochs 30 --batch 64
+
+# --object_id 0 => all objects
+```
+
+Resume from a checkpoint:
+
+```bash
+# RGB Rotation
+python -m models.rgb.resnetRotation.train --dataset_path data/linemod_yolo \
+    --resume checkpoints/rgb/resnetRotation/rotation_model.pth
+
+# RGB Translation  
+# RGBD Rotation
+# RGBD Translation
+# (same way)
 ```
 
 ## Inference
@@ -84,28 +108,27 @@ python models/rgbd/resnetTranslationRGBD/train.py --dataset_path data/linemod_yo
 ```bash
 # RGB pipeline
 python pipeline_rgb.py --dataset_root data/linemod_yolo --split val \
-    --yolo_weights checkpoints/yolo/weights/best.pt \
-    --resnet_rot_weights models/rgb/resnetRotation/weights.pth \
-    --resnet_tra_weights models/rgb/resnetTranslation/weights.pth \
+    --yolo_weights checkpoints/yolo/weights/yolo_model.pt \
+    --resnet_rot_weights checkpoints/rgb/resnetRotation/rotation_model.pth \
+    --resnet_tra_weights checkpoints/rgb/resnetTranslation/translation_model.pth \
     --output_file results_rgb.json
 
 # RGBD pipeline
 python pipeline_rgbd.py --dataset_root data/linemod_yolo --split val \
-    --yolo_weights checkpoints/yolo/weights/best.pt \
-    --resnet_rot_weights models/rgbd/resnetRotationRGBD/weights.pth \
-    --resnet_tra_weights models/rgbd/resnetTranslationRGBD/weights.pth \
+    --yolo_weights checkpoints/yolo/weights/yolo_model.pt \
+    --resnet_rot_weights checkpoints/rgbd/resnetRotationRGBD/rotation_rgbd_model.pth \
+    --resnet_tra_weights checkpoints/rgbd/resnetTranslationRGBD/translation_rgbd_model.pth \
     --output_file results_rgbd.json
 
 # ICP refinement
 python pipeline_icp.py --dataset_root data/linemod_yolo --split val \
-    --yolo_weights checkpoints/yolo/weights/best.pt \
-    --resnet_rot_weights models/rgbd/resnetRotationRGBD/weights.pth \
-    --resnet_tra_weights models/rgbd/resnetTranslationRGBD/weights.pth \
-    --icp_max_iter 50 --output_file results_icp.json
+    --yolo_weights checkpoints/yolo/weights/yolo_model.pt \
+    --resnet_rot_weights checkpoints/rgbd/resnetRotationRGBD/rotation_rgbd_model.pth \
+    --resnet_tra_weights checkpoints/rgbd/resnetTranslationRGBD/translation_rgbd_model.pth \
+    --output_file results_icp.json
 
 # Compute metrics
-python utils/compute_pipeline_metrics.py --results results_rgb.json \
-    --models_info data/linemod_yolo/models/models_info.yml
+python utils/compute_pipeline_metrics.py --results results_rgb.json
 ```
 
 ## LINEMOD Objects (13 Total)
@@ -169,10 +192,10 @@ Results saved in JSON format. Metrics computed in results/ directory.
 
 If using this code, cite:
 ```bibtex
-@software{ARMOR,
+@article{ARMOR,
   title={6D Object Pose Estimation: Accurate RGB-D Multi-modal Optimization and Refinement},
   author={Paduano, Elziario and Pavanati, Marco and Qureshi, Sadaf and Zeqaj, Klejsi},
-  year={2024}
+  year={2026}
 }
 ```
 
